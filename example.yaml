@@ -1,0 +1,191 @@
+# Examples for Panoptes Card
+# Add a manual card on a dashboard (Edit dashboard -> Add card -> Manual),
+# or use the visual editor and search for "Panoptes".
+# Replace the stream names (front_door_hd and so on) with the stream names from your own go2rtc,
+# and the entity names with entities from your own setup.
+
+# 1) Front door, new format (recommended)
+type: custom:panoptes-card
+visibility:
+  - condition: state
+    entity: switch.camera_front_door_privacy
+    state: 'off'
+grid_options:
+  columns: full
+cameras:
+  - name: Front door
+    streams:
+      - url: front_door_hd
+        name: HD
+      - url: front_door_sd
+        name: SD
+
+---
+# 2) Driveway with PTZ (Tapo buttons)
+type: custom:panoptes-card
+visibility:
+  - condition: state
+    entity: switch.camera_driveway_privacy
+    state: 'off'
+grid_options:
+  columns: full
+cameras:
+  - name: Driveway
+    streams:
+      - url: driveway_hd
+        name: HD
+      - url: driveway_sd
+        name: SD
+    ptz:
+      service: button.press
+      data_left:
+        entity_id: button.camera_driveway_move_left
+      data_right:
+        entity_id: button.camera_driveway_move_right
+      data_up:
+        entity_id: button.camera_driveway_move_up
+      data_down:
+        entity_id: button.camera_driveway_move_down
+
+---
+# 3) The old webrtc-camera format works too (change only the type)
+type: custom:panoptes-card
+streams:
+  - url: front_door_hd
+    name: HD
+    mode: webrtc
+  - url: front_door_sd
+    name: SD
+    mode: webrtc
+muted: true
+ui: true
+
+---
+# 4) Several cameras: focus + strip (HD on the large one, SD in the thumbnails)
+type: custom:panoptes-card
+grid_options:
+  columns: full
+cameras:
+  - name: Front door
+    streams:
+      - {url: front_door_hd, name: HD}
+      - {url: front_door_sd, name: SD}
+  - name: Driveway
+    streams:
+      - {url: driveway_hd, name: HD}
+      - {url: driveway_sd, name: SD}
+    ptz:
+      service: button.press
+      data_left: {entity_id: button.camera_driveway_move_left}
+      data_right: {entity_id: button.camera_driveway_move_right}
+      data_up: {entity_id: button.camera_driveway_move_up}
+      data_down: {entity_id: button.camera_driveway_move_down}
+  - name: Carport
+    streams:
+      - {url: carport_hd, name: HD}
+      - {url: carport_sd, name: SD}
+layout: focus      # auto, focus, grid or single
+strip: right       # auto, right or bottom
+gap: 8
+
+---
+# 5) Grid, two columns, SD only until a tile is opened in fullscreen
+type: custom:panoptes-card
+cameras:
+  - name: Front door
+    streams:
+      - {url: front_door_hd, name: HD}
+      - {url: front_door_sd, name: SD}
+  - name: Carport
+    streams:
+      - {url: carport_hd, name: HD}
+      - {url: carport_sd, name: SD}
+layout: grid
+grid_columns: 2
+
+---
+# 6) Startup animation: frame draw in amber, slow
+type: custom:panoptes-card
+cameras:
+  - name: Front door
+    streams:
+      - {url: front_door_hd, name: HD}
+      - {url: front_door_sd, name: SD}
+intro: frame        # focus, boot, frame, scan, iris, tv, blinds or none
+accent_color: amber # primary (default), ice, white, green, amber, red, violet or custom (applies to the whole card)
+intro_speed: slow   # fast, normal or slow
+
+---
+# 7) One camera at a time with switching, rounded corners and technical readout
+type: custom:panoptes-card
+layout: single
+corner_radius: 20
+readout: [connection, resolution, fps, bitrate, clock]
+cameras:
+  - name: Front door
+    streams: [{name: HD, url: front_door_hd}, {name: SD, url: front_door_sd}]
+  - name: Driveway
+    streams: [{name: HD, url: driveway_hd}, {name: SD, url: driveway_sd}]
+
+---
+# 8) Camera controls with privacy, presets, patrol and light
+type: custom:panoptes-card
+privacy_cover: network
+cameras:
+  - name: Driveway
+    streams: [{name: HD, url: driveway_hd}, {name: SD, url: driveway_sd}]
+    control:
+      privacy: switch.camera_driveway_privacy
+      preset: select.camera_driveway_move_to_preset
+      patrol: switch.camera_driveway_preset_patrol_mode
+      patrol_mode: select.camera_driveway_patrol_mode
+      light: light.camera_driveway_floodlight_timed
+
+---
+# 9) Carousel that switches camera every 15 seconds
+type: custom:panoptes-card
+layout: single
+carousel: true
+carousel_interval: 15
+switch_effect: slide   # soft, slide, zoom, flip, pixel, cube, push, spin, roll, blur, glitch, mosaic, noise, wash, tint, ripple, random or none
+cameras:
+  - name: Front door
+    streams: [{name: HD, url: front_door_hd}]
+  - name: Driveway
+    streams: [{name: HD, url: driveway_hd}]
+
+---
+# 10) Switch camera in fullscreen with thumbnails and arrow keys
+type: custom:panoptes-card
+layout: auto
+fullscreen_nav_modes: [arrows, thumbs, keys]   # arrows, thumbs, swipe, keys
+fullscreen_carousel: true
+cameras:
+  - name: Front door
+    streams: [{name: HD, url: front_door_hd}]
+  - name: Driveway
+    streams: [{name: HD, url: driveway_hd}]
+
+---
+# 11) Camera label and accent color
+type: custom:panoptes-card
+accent_color: custom
+accent_color_custom: '#ffb02e'
+cam_label: true              # label, by default CAM 01 from the camera's place in the list
+cam_label_style: line        # pill, tab, line, bar, text, outline, corners, glass or dot
+cam_label_color: auto        # auto, white, accent or custom (+ cam_label_color_custom: "#ffb000")
+cam_label_side: 12           # distance from the side in px (corners)
+cam_label_text: name         # number or name (the name in the label; then hide the title with title_position: hidden)
+cam_label_offset: 14         # distance from the edge in px
+cam_label_readout: true      # the readout at the bottom in the same style
+cam_label_pos: top-left      # the large camera: top-left, top-center, top-right, bottom-left, bottom-center, bottom-right or hidden
+cam_label_pos_small: hidden  # small tiles (strip and grid)
+cam_label_pos_fs: bottom-left # fullscreen
+cameras:
+  - name: Front door
+    streams:
+      - {url: front_door_hd, name: HD}
+  - name: Garage
+    label: GARAGE            # own text instead of CAM 02
+    streams:
+      - {url: garage_hd, name: HD}
