@@ -1,0 +1,6 @@
+Third-party notice
+
+The stream handling in panoptes-card.js is adapted from video-rtc.js in
+AlexxIT/WebRTC (https://github.com/AlexxIT/WebRTC), which is also MIT licensed:
+
+Copyright (c) Alexey Khit

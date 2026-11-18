@@ -377,4 +377,4 @@ All texts are in the `STRINGS` object, with the keys `label.*`, `help.*` and `o.
 
 ## License
 
-MIT. See [LICENSE](LICENSE). The stream handling is adapted from `video-rtc.js` in [AlexxIT/WebRTC](https://github.com/AlexxIT/WebRTC) (MIT).
+MIT. See [LICENSE](LICENSE). The stream handling is adapted from `video-rtc.js` in [AlexxIT/WebRTC](https://github.com/AlexxIT/WebRTC) (MIT). See [NOTICE](NOTICE).
