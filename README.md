@@ -1,18 +1,20 @@
 # Panoptes Card
 
-A Home Assistant card for go2rtc camera streams. HD/SD switching, PTZ, your own buttons, digital zoom, several cameras in one card and a visual editor. It is a replacement for `custom:webrtc-camera`.
+A Home Assistant card for go2rtc camera streams. HD/SD switching, PTZ, a control panel you build yourself, digital zoom, several cameras in one card and a visual editor. It is a replacement for `custom:webrtc-camera`.
 
 ![Focus layout with a strip of cameras](https://raw.githubusercontent.com/oreskov/panoptes-card/main/images/overview.png)
 
-- **One or many cameras in one card:** a large main camera with a strip of thumbnails, a grid, or one camera at a time
-- **HD where it matters:** the main camera and fullscreen use the first stream (HD), thumbnails and grid use the last (SD)
-- **Camera switching without a black gap:** the old picture stays frozen until the new camera plays, then it changes with an effect of your choice (16 effects plus random)
-- **Fullscreen for the whole card:** switch camera in fullscreen with arrows, thumbnails, swipe or arrow keys
-- **PTZ, camera panel and privacy mode** for each camera, using your own Home Assistant entities
-- **Digital zoom** with wheel, double click, drag and pinch
-- **Looks:** startup animation, accent color, a camera label in nine styles, title and technical readout
-- **Visual editor** in English and Danish, following the Home Assistant language
-- **Works like `webrtc-camera`:** the old `streams:` and `ptz:` format still works, so you can often change only the `type:`
+- One or many cameras in one card: a large main camera with a strip of thumbnails, a grid, or one camera at a time.
+- HD on the main camera and in fullscreen, SD on thumbnails and in the grid.
+- Camera switching with 16 effects (plus random). The old picture stays until the new camera plays.
+- Fullscreen for the whole card, with camera switching by arrows, thumbnails, swipe or arrow keys.
+- A control panel per camera that you build yourself: switches, lights, selects, buttons, numbers and sensors, in the panel or directly on the picture.
+- PTZ with arrows you can style (look, size, color and placement), and a privacy mode with animated covers.
+- Digital zoom with wheel, double click, drag and pinch.
+- Picture fit (contain, fill or cover) for the card, for each camera and for fullscreen, also separately for phones and tablets.
+- Startup animation, accent color, a camera label in nine styles, title and technical readout.
+- A visual editor in English and Danish, following the Home Assistant language.
+- The old `webrtc-camera` format (`streams:` and `ptz:`) still works, so you can often change only the `type:`.
 
 ## Previews
 
@@ -114,7 +116,7 @@ If you open such a card in the visual editor and change something, it is saved i
 
 ![Switch effects: cube, glitch, ripple, mosaic, color wash and roll](https://raw.githubusercontent.com/oreskov/panoptes-card/main/images/effects.webp)
 
-When you switch camera, the old picture stays frozen until the new camera plays, and then the card changes with the chosen effect. There is never a black gap. The same goes for switching between HD and SD: the picture stays frozen until the new quality plays and then fades over, while the quality button pulses briefly. The speed follows `intro_speed`.
+When you switch camera, the old picture stays frozen until the new camera plays, and then the card changes with the chosen effect. The same goes for switching between HD and SD: the picture stays frozen until the new quality plays and then fades over, while the quality button pulses briefly. The speed follows `intro_speed`.
 
 The effect is chosen under **Layout** and applies to both Single and Focus + strip. In Single, Slide pushes the picture out to the side. In Focus + strip, Slide makes the tiles glide into place, while the other effects swap the tiles at once and let the new main camera replace the old one with the effect. `animations: false` turns off all switch effects in Focus + strip.
 
@@ -145,9 +147,9 @@ The color effects follow the accent color (`accent_color`). The effects use stil
 
 ## Carousel
 
-With `carousel: true` the card switches between the cameras by itself. It pauses while you use the card (hover, touch, zoom or an open panel) and starts again after a few seconds without activity. It also pauses when the tab is hidden or the card is out of view. Cameras with privacy turned on are skipped. If all the other cameras have privacy on, nothing switches and the line at the bottom stays empty. In the grid layout nothing happens. Turn it on under **Layout** in the editor.
+With `carousel: true` the card switches between the cameras by itself. It pauses while you use the card (hover, touch, zoom or an open panel) and starts again after a few seconds without activity. It also pauses when the tab is hidden or the card is out of view. Cameras with privacy turned on are skipped. In the grid layout nothing happens. Turn it on under **Layout** in the editor.
 
-The pause button (`carousel_pause`, on by default) lets you hold the carousel yourself. It sits in the top right, just below the quality button (HD/SD), or on its own if the camera has only one stream. Press it again to continue. It is also available in fullscreen, and the pause is not saved when the page reloads.
+The pause button (`carousel_pause`, on by default) lets you hold the carousel yourself. It sits in the top right, in the same row as the panel button and the quality button (HD/SD), furthest to the left. Press it again to continue. It is also available in fullscreen, and the pause is not saved when the page reloads.
 
 ## Fullscreen
 
@@ -163,6 +165,8 @@ Switching uses the chosen switch effect. The carousel continues in fullscreen by
 ## Control panel and privacy
 
 Every camera can get a `control:` section with entities. A small button at the top right, next to HD/SD, opens a panel over the picture (on narrow cards it opens from the bottom). The panel is shown only on the large camera and only with the entities you chose. Choose the entities in the editor under **Cameras**, and panel and cover under **Control**. If you choose one entity, the editor suggests the others from the name.
+
+![The standard control panel open over the picture](https://raw.githubusercontent.com/oreskov/panoptes-card/main/images/panel.webp)
 
 ```yaml
 cameras:
@@ -181,6 +185,64 @@ cameras:
 - **Patrol:** a switch and a direction (Horizontal/Vertical). While the patrol runs, the PTZ ring is hidden.
 - **Light:** turns the floodlight on and off.
 - `control_panel: false` hides the panel button completely (the cover still works).
+
+### Your own panel elements
+
+By default the panel shows the five controls above. With `panel_mode` on the camera you can build the panel yourself, per camera. In the picture below the panel is a grid, and three elements sit directly on the picture (the lamp and the siren as icons, the temperature with its value):
+
+![Your own panel as a grid, with elements on the picture](https://raw.githubusercontent.com/oreskov/panoptes-card/main/images/custom.webp)
+
+The options:
+
+- `panel_mode: default` is the standard panel from `control:` (nothing to set).
+- `panel_mode: extra` is the standard panel plus your own elements.
+- `panel_mode: custom` is only your own elements.
+
+The elements are listed in `panel_items`. In the editor, "Insert standard elements" recreates the standard panel as editable rows, and the copy button copies the list to other cameras.
+
+```yaml
+cameras:
+  - name: Driveway
+    streams: [{name: HD, url: driveway_hd}]
+    panel_mode: custom
+    panel_items:
+      - type: privacy                       # the privacy switch (uses control.privacy)
+      - entity: light.driveway_floodlight   # a switch, light, select, button, number ...
+        name: Floodlight
+        icon: mdi:lightbulb
+        display: light-slider               # how it looks (see below)
+        color_on: "#ffb000"
+        on_picture: left                    # also directly on the picture
+        pic_show: name_icon_value           # what the picture shows (see below)
+      - entity: select.driveway_mode
+        display: chips
+        hide_ptz: true                      # hide the PTZ ring while this is on
+```
+
+- **Entities:** `switch`, `input_boolean`, `light`, `fan` (toggle), `select`, `input_select` (choose an option), `button`, `input_button` (press), `script`, `scene` (run), `number`, `input_number` (slider) and read-only `sensor`, `binary_sensor`.
+- **display:** `auto` (the card chooses), `toggle`, `light-slider`, `select`, `chips`, `dropdown`, `button`, `slider` or `value`.
+- **Item settings:** `name`, `icon`, `color` and `color_on` (a color), `in_panel` (default `true`), `on_picture` (`none`, `left` or `right`), `pic_show` and `hide_ptz`.
+- **pic_show:** what an element shows on the picture. Default: only the icon on switches and buttons, icon and value on read-outs. Other choices: `icon`, `value` (status only), `icon_value`, `name_icon_value` and `name`. Buttons have no status, so they keep their icon.
+- **Status text:** the status is shown in Home Assistant's own wording and language (for example "Off" or "Slukket").
+- **Copy a whole panel:** under the element list, "Copy panel" stores the camera's panel and "Paste panel" puts it on another camera, also on another dashboard. If pasting does not work in your browser, a text box appears where you paste the copied text. A camera with the standard panel has nothing to copy until you press "Insert standard elements". The entity names follow along, so change them on the new camera.
+- **On the picture:** elements with `on_picture` sit in two columns under the title row. If there is no room, they move into the panel. They keep clear of the PTZ arrows, the side arrows and the panel. Select and slider elements on the picture are read-only.
+- **Services:** the card only calls a few services: switch on/off, select option, button press, script and scene on, number set value and light brightness.
+
+### Panel look
+
+These settings apply to the whole card (the Panel tab in the editor).
+
+| Setting | Default | What it does |
+|---|---|---|
+| `panel_open` | `auto` | `auto` (under the button on wide cards, at the bottom on narrow ones), `under_button` or `bottom`. |
+| `panel_layout` | `list` | `list` (one row per element) or `grid` (small tiles). |
+| `panel_bg` | `glass` | `glass`, `solid` or `clear`. |
+| `panel_opacity` | `0.82` | How see-through the glass is (0.3 to 1). |
+| `panel_radius` | `14` | Corner radius in px (0 to 32). |
+| `panel_width` | `230` | Width in px when the panel opens under the button (160 to 360). |
+| `panel_color_on` | `accent` | Color for "on" in the panel and on the picture: `accent` or `custom` (see `panel_color_on_custom`). An element's own color wins. |
+| `panel_color_on_custom` | | Your own color, for example `"#ff00ff"`. |
+| `privacy_hides_others` | `true` | While privacy is on, hide all other elements. Set `false` to keep them visible. |
 
 ## Startup animation
 
@@ -207,7 +269,7 @@ Everything can be set in the visual editor. Default values are not written to th
 
 | Setting | Default | What it does |
 |---|---|---|
-| `cameras` | | List of cameras. Each camera has `name`, `streams` and optionally `ptz` and `control`. An optional `label` is your own text for the camera label (max. 24 characters). |
+| `cameras` | | List of cameras. Each camera has `name`, `streams` and optionally `ptz` and `control`. An optional `label` is your own text for the camera label (max. 24 characters). Optional `video_fit` and `video_fit_fs` override the card's picture fit for that camera only (see below). |
 | `layout` | `auto` | `auto`, `focus`, `grid` or `single`. See "Several cameras". |
 | `switch_effect` | `soft` in Single, `slide` in Focus + strip | Effect when switching camera. See the list under "Switching camera and quality". |
 | `camera_nav` | `true` | With `layout: single` and several cameras: arrows at the sides and dots at the bottom to switch camera. On touch you can also swipe. |
@@ -215,7 +277,7 @@ Everything can be set in the visual editor. Default values are not written to th
 | `carousel` | `false` | Carousel: switches the shown camera automatically (layout Single, and the main camera in Focus + strip). |
 | `carousel_interval` | `10` | Seconds between switches (3 to 600). The editor offers 5, 10, 15, 30 and 60. |
 | `carousel_bar` | `true` | A thin line at the bottom that fills up toward the next switch. |
-| `carousel_pause` | `true` | Pause button for the carousel (below the quality button), so you can hold it yourself. Only shown when the carousel is on. |
+| `carousel_pause` | `true` | Pause button for the carousel (next to the panel button), so you can hold it yourself. Only shown when the carousel is on. |
 | `fullscreen_nav` | `true` | Switch camera in fullscreen. When off, fullscreen shows only the camera you opened. |
 | `fullscreen_nav_modes` | `[arrows, swipe, keys]` | How to switch in fullscreen: `arrows` (arrows and dots), `thumbs` (thumbnails), `swipe`, `keys` (arrow keys). |
 | `fullscreen_carousel` | `true` | The carousel also switches camera in fullscreen. |
@@ -224,8 +286,30 @@ Everything can be set in the visual editor. Default values are not written to th
 | `gap` | `8` | Space between the cameras in pixels (0 to 40). |
 | `auto_quality` | `true` | HD only on the large camera, SD in thumbnails and grid. |
 | `animations` | `true` | Gliding change when another camera becomes the main camera. |
-| `aspect_ratio` | `16/9` | The aspect ratio of the card. |
+| `aspect_ratio` | `16/9` | The shape of the picture box on the card: `16/9`, `4/3`, `21/9`, `3/2`, `1/1`, `9/16`, or your own such as `16/10` (choose **Custom** in the editor). The camera's own picture is not changed. |
+| `video_fit` | `contain` | How the picture fills its box on the card (large camera, single view and grid tiles): `contain` shows the whole picture, with black bars if the shapes differ; `fill` stretches the picture to fill the box (it is distorted if the shapes differ); `cover` fills the box without distortion but cuts off the edges. Thumbnails always use `cover`. Can be set per camera, see below. |
+| `video_fit_fs` | `contain` | The same choices, for fullscreen only. `fill` and `cover` make the picture fill the whole screen. |
+| `video_fit_fs_touch` | `follow` | Fullscreen on phones and tablets (touch screens) only, for example `cover` to always fill the screen there while a PC keeps `video_fit_fs`. `follow` means the same as `video_fit_fs`. A camera's own `video_fit_fs` still wins over this card setting. Per camera, `video_fit_fs_touch` overrides everything else on touch screens. |
 | `corner_radius` | the Home Assistant default | Corner radius in pixels (0 to 32) on the card and the camera frames. |
+
+#### Picture fit per camera
+
+Every camera can have its own picture fit (in the editor: open the camera, **Picture fit**). The first choice is **Follow the card**.
+
+```yaml
+type: custom:panoptes-card
+aspect_ratio: 16/9
+video_fit: contain          # the card default
+video_fit_fs: cover         # fullscreen fills the screen
+cameras:
+  - name: Robot
+    video_fit: fill         # this 4:3 camera fills the 16:9 box
+    streams:
+      - {url: robot, name: HD}
+  - name: Front door
+    streams:
+      - {url: front_door_hd, name: HD}
+```
 
 ### Playback
 
@@ -234,8 +318,8 @@ Everything can be set in the visual editor. Default values are not written to th
 | `streams` | | (Old format) List directly on the card. Each stream has `url` (go2rtc name or URL), `name`, `mode`, `media` and optionally `entity`. |
 | `mode` | automatic | How the stream is fetched: leave empty for automatic (tries WebRTC, then MSE, HLS and MJPEG), or choose `webrtc`, `mse`, `hls` or `mjpeg`. Can also be set on a single stream. Under **Advanced** in the editor. |
 | `muted` | `true` | Sound off by default. |
-| `ui` | `own` | Buttons on the picture: `own` (the card's own buttons: fullscreen, screenshot, picture-in-picture, play, sound; the same on every device), `browser` (the browser's own player controls, only on the large camera, never on small tiles; they look different in every browser) or `none` (a clean picture, the browser's picture-in-picture button is hidden too). `true` means `own` and `false` means `browser`, so old setups keep working. |
-| `pip` | `auto` | Only with `ui: own`. Picture-in-picture: `auto` (the card's button only on a computer), `always`, `never` (hides only the card's own button), `own` (keeps the card's own button and hides the browser's, for example Firefox's small PiP button) or `off` (turns PiP off completely on the video). Replaces `hide_browser_pip`. Known: in Firefox the browser's own button comes back after the first use of the card's button with `own`, until the page is reloaded. |
+| `ui` | `own` | Buttons on the picture: `own` (the card's own buttons: fullscreen, screenshot, picture-in-picture, play, sound; the same on every device), `browser` (the browser's own player controls, only on the large camera, never on small tiles; they look different in every browser) or `none` (a clean picture, the browser's picture-in-picture button is hidden too). |
+| `pip` | `auto` | Only with `ui: own`. Picture-in-picture: `auto` (the card's button only on a computer), `always`, `never` (hides only the card's own button), `own` (keeps the card's own button and hides the browser's, for example Firefox's small PiP button) or `off` (turns PiP off completely on the video). |
 | `digital_zoom` | `true` | Zoom and pan with wheel, double click, drag and pinch. |
 | `double_tap_zoom` | `true` | Double click (computer) and double tap (touch) zoom in and out. Can be turned off without losing wheel, drag and pinch. |
 | `pause_offscreen` | `true` | Stops the stream when the card is out of view or the tab is hidden. Turned off, it keeps running out of view but still stops in a hidden tab. |
@@ -286,6 +370,7 @@ A small label next to the title, by default `CAM 01` (the camera's place in the 
 |---|---|---|
 | `control_panel` | `true` | Panel button for camera control (see "Control panel and privacy"). |
 | `preset_style` | `auto` | `auto`, `buttons` or `dropdown`. |
+| `panel_*` and `privacy_hides_others` | | The look of the panel, see "Panel look". |
 | `privacy_cover` | `black` | Cover while privacy is on: `black`, `blur`, `network`, `stream`, `radar`, `cams`, `clock`, `none`. |
 | `privacy_cover_small` | `true` | Animation in the privacy cover also on thumbnails and grid tiles. |
 | `privacy_cover_quality` | `normal` | Sharpness of the animated covers: `low` (saves memory), `normal` or `high` (follows the screen). Higher is sharper on sharp screens but uses more memory while privacy is on. |
@@ -309,27 +394,53 @@ ptz:
 
 In the editor you choose one button, and the card suggests the other three if they are named `..._move_left/right/up/down`. `ptz.enabled: false` turns PTZ off without deleting the setup. `ptz.opacity` (0 to 1) controls how visible the arrows are.
 
+### PTZ look
+
+The arrows can be styled per camera, inside the camera's `ptz:`. All of it is also in the editor.
+
+![PTZ arrows: ring, cross, and four large buttons in the theme color](https://raw.githubusercontent.com/oreskov/panoptes-card/main/images/ptz.webp)
+
+| Setting | Default | Description |
+|---|---|---|
+| `style` | `ring` | `ring` (round plate), `cross` (only the arrows) or `buttons` (each arrow in its own round button). |
+| `size` | `medium` | `small`, `medium` or `large`. |
+| `pos` | `right` | Where the arrows sit: `top-left`, `top`, `top-right`, `left`, `center`, `right` (middle right), `bottom-left`, `bottom`, `bottom-right`. Top starts below the name row, bottom sits above the button row. |
+| `color` | `white` | `white`, `accent` (the theme color) or `custom` (then set `color_custom`, for example `'#4fd8ff'`). |
+| `opacity` | `0.4` | How visible the arrows are until you point at them (0 to 1). |
+
+```yaml
+ptz:
+  service: button.press
+  data_left: {entity_id: button.camera_driveway_move_left}
+  data_right: {entity_id: button.camera_driveway_move_right}
+  data_up: {entity_id: button.camera_driveway_move_up}
+  data_down: {entity_id: button.camera_driveway_move_down}
+  style: buttons
+  size: large
+  pos: bottom-right
+  color: accent
+```
+
+Elements on the picture make room for the arrows. If they do not fit, the rest goes to the panel as before.
+
 ## Performance
 
 A camera card runs live video, so it is worth keeping the load down. The defaults are chosen for that:
 
-- **SD where the picture is small.** With `auto_quality` only the main camera and fullscreen use HD. Thumbnails and grid use the SD stream.
-- **Nothing runs out of view.** `pause_offscreen` stops the stream when the card is scrolled away or the tab is hidden. In fullscreen the cameras behind the visible one keep running by default; `fullscreen_pause_others` stops them (off by default, because switching camera can then take a moment longer).
-- **Effects use still frames.** Switch effects work on snapshots, so the live video is never transformed. The snapshots are limited to 1280 px wide by default (`still_size`). Use `small` on a weak device, or turn off `animations` or set `switch_effect: none`.
-- **Privacy covers.** The animated covers only run while the camera is in view. `privacy_cover_small: false` keeps the small tiles still, and `privacy_cover_quality: low` uses less memory.
-- **Startup** is skipped when the operating system is set to reduced motion.
+- Only the main camera and fullscreen use HD (`auto_quality`). Thumbnails and the grid use the SD stream.
+- The stream stops when the card is scrolled out of view or the tab is hidden (`pause_offscreen`). In fullscreen the cameras behind the visible one keep running unless you turn on `fullscreen_pause_others`. It is off by default, because switching camera can then take a moment longer.
+- Switch effects work on still frames, so the live video is never transformed. The frames are limited to 1280 px wide (`still_size`). On a weak device, use `small`, turn off `animations` or set `switch_effect: none`.
+- The animated privacy covers only run while the camera is in view. `privacy_cover_small: false` keeps the small tiles still, and `privacy_cover_quality: low` uses less memory.
+- The startup animation is skipped when the operating system is set to reduced motion.
 
 If a tablet or an old phone stutters: use a grid with fewer cameras, keep the SD stream last in the list, set `switch_effect: none`, and `intro: none`.
 
 ## Known limitations
 
-- No ready-made themes: the card is built on a minimal look with options. Shortcuts to ready-made styles may come later.
-- Not yet: tabs, motion sensor highlight, automatic HD/SD pairing, microphone/talk to the camera.
-- PTZ: directions only (not zoom, home or press-and-hold).
-- Not carried over from `webrtc-camera`: custom `shortcuts` buttons (use `control:` instead), `style` (CSS) and templates (`${...}`).
+- Not yet: motion sensor highlight, automatic HD/SD pairing, microphone/talk to the camera.
+- PTZ: the arrows turn the camera (directions only). Optical zoom, home position and press-and-hold are not supported. Digital zoom in the picture works separately (`digital_zoom`).
 - The stream list is not fetched from go2rtc. You type the names in the editor.
-- Older names from early versions (`intro_color`, `cam_label_where`, `theme`) are no longer read. Use `accent_color` and `cam_label_pos`.
-- Picture-in-picture `own` in Firefox: see the `pip` setting above.
+- With `pip: own` in Firefox, the browser's own picture-in-picture button comes back after the first use of the card's button, until the page is reloaded.
 
 ## Troubleshooting
 
@@ -337,10 +448,7 @@ If a tablet or an old phone stutters: use a grid with fewer cameras, keep the SD
 Check that the WebRTC Camera integration is installed and that the stream name exists in go2rtc.
 
 **The card does not exist ("Custom element doesn't exist")**
-The resource is not added, or the cache must be cleared (Ctrl+F5). Open F12 → Console. It should say `PANOPTES-CARD v1.0.0` when the card is loaded.
-
-**The editor rewrites the old format**
-If you open a card with `streams:` directly on the card in the editor and change something, it is saved in the new `cameras:` format. The card itself works unchanged until you change something.
+The resource is not added, or the cache must be cleared (Ctrl+F5). Open F12 → Console. It should say `PANOPTES-CARD v1.1.0` when the card is loaded.
 
 **It works at home but not from outside**
 The card uses the WebRTC Camera integration's endpoint through Home Assistant. If Home Assistant itself works from outside (for example over Tailscale), the cameras do too. A direct `server:` address to go2rtc only works where that address can be reached.
@@ -349,7 +457,7 @@ The card uses the WebRTC Camera integration's endpoint through Home Assistant. I
 Add `debug: true` to the card's YAML (there is no editor switch for it). A small box appears on the card with the version, uptime, memory use, how many streams are running and how many videos and canvases exist. Include its text if you open an issue on GitHub. Remove the line again when you are done.
 
 **Sound or picture-in-picture does not work**
-Browsers only allow sound after a tap on the page, and picture-in-picture needs a click on the button. On iPhone and iPad, fullscreen may be limited to the video itself (not tested).
+Browsers only allow sound after a tap on the page, and picture-in-picture needs a click on the button.
 
 ---
 
@@ -372,6 +480,26 @@ All texts are in the `STRINGS` object, with the keys `label.*`, `help.*` and `o.
 ---
 
 ## Release notes
+
+**1.1.0**
+
+*Control panel*
+- Build your own panel per camera: add any switch, light, select, button, number or sensor (`panel_mode`, `panel_items`), choose how it looks, its icon and colors, and place it in the panel or directly on the picture (`on_picture`, `pic_show`).
+- Elements can hide the PTZ ring (`hide_ptz`). The standard panel can be recreated as elements you can edit.
+- Copy the list to other cameras, or copy and paste a whole panel with the card's own clipboard.
+- The status is shown in Home Assistant's own wording and language.
+- New look settings for the whole card (`panel_open`, `panel_layout`, `panel_bg`, `panel_opacity`, `panel_radius`, `panel_width`, `panel_color_on`) and `privacy_hides_others`.
+- The carousel pause button now sits in the top-right row next to the panel button.
+
+*Picture*
+- Picture fit: `video_fit` and `video_fit_fs` (contain, fill or cover) on the card and in fullscreen, also per camera, so a 4:3 camera can fill a 16:9 box or the whole screen. `video_fit_fs_touch` sets the fullscreen choice for phones and tablets only.
+- The aspect ratio is now a menu (with a custom option). Switch effects follow the chosen fit.
+- PTZ arrows can be styled per camera: `style` (ring, cross or four buttons), `size`, `color`, `opacity` and `pos` (nine places) inside `ptz:`, also in the editor.
+- During the startup animation only the animation is shown. Buttons, title, elements and PTZ fade in afterwards.
+
+*Editor*
+- The Layout and Look tabs are split into collapsible groups.
+- New help texts for several settings (camera switching position, carousel interval and progress line, thumbnail strip, grid columns, smooth switching, intro speed, custom aspect ratio, digital zoom, double tap zoom, muted).
 
 **1.0.0** First public release.
 

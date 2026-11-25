@@ -1,5 +1,5 @@
 /*!
- * Panoptes Card til Home Assistant  (v1.0.0)
+ * Panoptes Card til Home Assistant  (v1.1.0)
  * https://github.com/oreskov/panoptes-card  -  MIT-licens
  *
  * Et kamerakort til go2rtc-streams (erstatter custom:webrtc-camera).
@@ -23,7 +23,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.0.0';
+    const VERSION = '1.1.0';
     /** Frigiver et lærreds pixelhukommelse med det samme (Android WebView venter ellers længe med at rydde op). */
     const freeCv = cv => {
         try { cv.width = 0; cv.height = 0; } catch (e) { /* ignorer */ }
@@ -46,6 +46,10 @@
     const DEFAULT_MEDIA = 'video,audio';
     const DIRS = ['left', 'right', 'up', 'down'];
     const DIR_ICONS = {left: 'mdi:arrow-left', right: 'mdi:arrow-right', up: 'mdi:arrow-up', down: 'mdi:arrow-down'};
+    /* PTZ-knappernes udseende: stil, størrelse (skala) og placering (ni felter). Standard: ring, mellem, midt til højre. */
+    const PTZ_STYLES = ['ring', 'cross', 'buttons'];
+    const PTZ_SIZES = {small: 0.75, medium: 1, large: 1.35};
+    const PTZ_POSITIONS = ['top-left', 'top', 'top-right', 'left', 'center', 'right', 'bottom-left', 'bottom', 'bottom-right'];
 
     const INTRO_COLORS = {
         ice: 'rgb(79 216 255)',
@@ -61,8 +65,112 @@
     const STILL_SIZE = {small: 640, medium: 1280, full: 0};
     const esc = v => String(v).replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
     const ENTITY_RE = /^[a-z0-9_]+\.[a-z0-9_]+$/;
+    const ICON_RE = /^[a-z0-9_-]+:[a-z0-9_-]+$/i;
+    const COLOR_RE = /^(#[0-9a-f]{3,8}|[a-z]{3,20}|(rgb|rgba|hsl|hsla)\([0-9 ,.%/-]+\)|var\(--[a-z0-9-]+\))$/i;
+    /* Elementer i panelet: hvilke entitetstyper der kan hvad. Kortet kalder kun tjenester, der passer til entitetens type. */
+    const TOGGLE_DOM = ['switch', 'input_boolean', 'light', 'fan'];
+    const SELECT_DOM = ['select', 'input_select'];
+    const PRESS_DOM = ['button', 'input_button', 'script', 'scene'];
+    const NUM_DOM = ['number', 'input_number'];
+    const ONOFF_DOM = ['switch', 'input_boolean', 'light', 'fan', 'binary_sensor'];
+    /** Lader et element fange al berøring og alt museklik, så intet går videre til det, der ligger bagved. */
+    const swallowEvents = el => ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'dblclick', 'contextmenu'].forEach(t => el.addEventListener(t, ev => ev.stopPropagation()));
+    /** Renser ét element fra indsat tekst: kun kendte nøgler med gyldige værdier overlever. Giver null, hvis det ikke kan bruges. */
+    const cleanPanelItem = raw => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+        const out = {};
+        if (raw.type === 'privacy') out.type = 'privacy';
+        else if (typeof raw.entity === 'string' && ENTITY_RE.test(raw.entity)) out.entity = raw.entity;
+        else return null;
+        if (typeof raw.name === 'string' && raw.name.trim()) out.name = raw.name.trim().slice(0, 40);
+        if (typeof raw.icon === 'string' && ICON_RE.test(raw.icon)) out.icon = raw.icon;
+        ['color', 'color_on'].forEach(k => { if (typeof raw[k] === 'string' && COLOR_RE.test(raw[k].trim())) out[k] = raw[k].trim(); });
+        if (DISPLAYS.includes(raw.display) && raw.display !== 'auto') out.display = raw.display;
+        if (raw.in_panel === false) out.in_panel = false;
+        if (raw.on_picture === 'left' || raw.on_picture === 'right') out.on_picture = raw.on_picture;
+        if (raw.hide_ptz === true) out.hide_ptz = true;
+        if (PIC_SHOWS.includes(raw.pic_show) && out.on_picture) out.pic_show = raw.pic_show;
+        return out;
+    };
+    /**
+     * Kortets egen udklipsholder til paneler: deles af alle Panoptes-editorer i browseren, huskes i localStorage og virker uden browserens
+     * udklipsholder (også over http). Indholdet er altid renset: {mode, items, from}.
+     */
+    const PanelClip = {
+        KEY: 'panoptes-card:panel-clip',
+        item: null,
+        loaded: false,
+        get() {
+            if (!this.loaded) {
+                this.loaded = true;
+                try {
+                    const d = JSON.parse(localStorage.getItem(this.KEY) || 'null');
+                    const items = d && Array.isArray(d.items) ? d.items.map(cleanPanelItem).filter(Boolean).slice(0, 40) : [];
+                    if (items.length) this.item = {mode: d.mode === 'extra' ? 'extra' : 'custom', items, from: typeof d.from === 'string' ? d.from.slice(0, 40) : ''};
+                } catch (e) { /* intet gemt eller ulæseligt: udklipsholderen er tom */ }
+            }
+            return this.item;
+        },
+        set(item) {
+            this.item = item || null;
+            this.loaded = true;
+            try {
+                if (this.item) localStorage.setItem(this.KEY, JSON.stringify(this.item));
+                else localStorage.removeItem(this.KEY);
+            } catch (e) { /* localStorage er ikke tilgængelig: udklipsholderen gælder, til siden genindlæses */ }
+        },
+    };
+    /** Kopierer tekst til udklipsholderen. Først browserens moderne metode, så den ældre (virker også over http). Giver false, hvis begge fejler. */
+    const copyToClipboard = async (text, host) => {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (e) { /* prøver den ældre metode */ }
+        let ta = null;
+        try {
+            ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0';
+            // Skal ligge inde i editoren (i dialogen), ellers tager dialogens fokusfælde markeringen, og udklipsholderen bliver tom
+            (host || document.body).appendChild(ta);
+            ta.focus({preventScroll: true});
+            ta.select();
+            ta.setSelectionRange(0, text.length);
+            return !!document.execCommand('copy');
+        } catch (e) {
+            return false;
+        } finally {
+            if (ta) ta.remove();
+        }
+    };
+    const PIC_SHOWS = ['icon', 'value', 'icon_value', 'name_icon_value', 'name'];
+    const DISPLAYS = ['auto', 'toggle', 'chips', 'dropdown', 'slider', 'button', 'value'];
+    const DOMAIN_ICON = {switch: 'mdi:toggle-switch', input_boolean: 'mdi:toggle-switch', light: 'mdi:lightbulb', fan: 'mdi:fan', select: 'mdi:format-list-bulleted', input_select: 'mdi:format-list-bulleted', button: 'mdi:gesture-tap-button', input_button: 'mdi:gesture-tap-button', script: 'mdi:script-text', scene: 'mdi:palette', number: 'mdi:ray-vertex', input_number: 'mdi:ray-vertex', sensor: 'mdi:eye', binary_sensor: 'mdi:radiobox-marked'};
+    const lightDims = st => { const m = st && st.attributes && st.attributes.supported_color_modes; return Array.isArray(m) && m.some(x => x !== 'onoff'); };
+    /** Hvordan et element vises: toggle, light-slider (kontakt + lysstyrke), select (valgknapper eller rullemenu efter preset_style), chips, dropdown, button, slider eller value. */
+    const itemDisplay = (it, st) => {
+        const dom = it.entity.split('.')[0];
+        const d = it.display;
+        if (d === 'value') return 'value';
+        if (TOGGLE_DOM.includes(dom)) {
+            if (dom === 'light' && (d === 'slider' || ((d === 'auto' || !d) && lightDims(st)))) return 'light-slider';
+            return 'toggle';
+        }
+        if (SELECT_DOM.includes(dom)) return d === 'chips' || d === 'dropdown' ? d : 'select';
+        if (PRESS_DOM.includes(dom)) return 'button';
+        if (NUM_DOM.includes(dom)) return 'slider';
+        return 'value';
+    };
     const CONTROL_KEYS = ['privacy', 'preset', 'patrol', 'patrol_mode', 'light'];
     const PRIVACY_COVERS = ['none', 'black', 'blur', 'network', 'stream', 'radar', 'cams', 'clock'];
+    // Billedfyldning: contain = hele billedet (standard), fill = strækkes, cover = fylder og beskærer
+    const FITS = ['contain', 'fill', 'cover'];
+    const AR_PRESETS = ['16/9', '4/3', '21/9', '3/2', '1/1', '9/16'];
+    const AR_RE = /^\d+(\.\d+)?\s*\/\s*\d+(\.\d+)?$/;
+    const arNorm = v => String(v || '').replace(/\s+/g, '');
 
     /**
      * Animationer til privatlivsdækningen. Hver har init(s, w, h) og draw(g, w, h, t, dt, s, col).
@@ -587,7 +695,7 @@
             const video = this.video = document.createElement('video');
             video.playsInline = true;
             video.preload = 'auto';
-            video.style.cssText = 'display:block;width:100%;height:100%;object-fit:contain;background:#000';
+            video.style.cssText = 'display:block;width:100%;height:100%;object-fit:var(--pn-fit,contain);background:#000';
             this.appendChild(video);
 
             video.addEventListener('error', ev => {
@@ -1396,9 +1504,6 @@
         .car-pause:hover, .car-pause.on { opacity: 1; }
         .car-pause.on { background: var(--pn-intro, #4fd8ff); color: #04141a; }
         .car-pause ha-icon { --mdc-icon-size: 18px; }
-        /* Med en kvalitetsknap (HD/SD) hænger pauseknappen lige under den */
-        .h-right.q2 { position: relative; }
-        .h-right.q2 .car-pause { position: absolute; top: 100%; right: 0; margin-top: 6px; }
         .tile.mini:not(.fs) .car-pause, .tile.grid:not(.fs) .car-pause { display: none; }
 
         .msg {
@@ -1435,13 +1540,14 @@
             z-index: 2;
         }
         .controls ha-icon, .ring ha-icon {
-            color: #fff;
+            color: var(--pn-ptz-color, #fff);
             cursor: pointer;
             filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
         }
         .controls .space { flex: 1; }
 
         .ptz {
+            --s: var(--pn-ptz-scale, 1);
             position: absolute;
             top: 50%;
             right: 10px;
@@ -1451,18 +1557,34 @@
             z-index: 2;
         }
         .ptz:hover { opacity: 1; }
+        /* Placering: standard er midt til højre. Øverst starter under titelrækken, nederst over knaplinjen. */
+        .ptz.p-left { right: auto; left: 10px; }
+        .ptz.p-center { right: auto; left: 50%; transform: translate(-50%, -50%); }
+        .ptz.p-top, .ptz.p-top-left, .ptz.p-top-right { top: calc(var(--pn-title-offset, 14px) + 38px); transform: none; }
+        .ptz.p-bottom, .ptz.p-bottom-left, .ptz.p-bottom-right { top: auto; bottom: 56px; transform: none; }
+        .ptz.p-top, .ptz.p-bottom { right: auto; left: 50%; transform: translateX(-50%); }
+        .ptz.p-top-left, .ptz.p-bottom-left { right: auto; left: 10px; }
         .ring {
             position: relative;
-            width: 80px;
-            height: 80px;
+            width: calc(80px * var(--s));
+            height: calc(80px * var(--s));
             border-radius: 50%;
             background: rgba(0, 0, 0, 0.3);
         }
-        .ring ha-icon { position: absolute; }
-        .ring .up { top: 5px; left: 50%; transform: translateX(-50%); }
-        .ring .down { bottom: 5px; left: 50%; transform: translateX(-50%); }
-        .ring .left { left: 5px; top: 50%; transform: translateY(-50%); }
-        .ring .right { right: 5px; top: 50%; transform: translateY(-50%); }
+        .ring ha-icon { position: absolute; --mdc-icon-size: calc(24px * var(--s)); }
+        .ring .up { top: calc(5px * var(--s)); left: 50%; transform: translateX(-50%); }
+        .ring .down { bottom: calc(5px * var(--s)); left: 50%; transform: translateX(-50%); }
+        .ring .left { left: calc(5px * var(--s)); top: 50%; transform: translateY(-50%); }
+        .ring .right { right: calc(5px * var(--s)); top: 50%; transform: translateY(-50%); }
+        /* Kryds: kun pilene, uden den runde baggrund. Fire knapper: hver pil i sin egen runde knap. */
+        .ring.s-cross { background: none; }
+        .ring.s-cross ha-icon { filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.9)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6)); }
+        .ring.s-buttons { background: none; }
+        .ring.s-buttons ha-icon { background: rgba(0, 0, 0, 0.35); border-radius: 50%; padding: calc(4px * var(--s)); }
+        .ring.s-buttons .up { top: 0; }
+        .ring.s-buttons .down { bottom: 0; }
+        .ring.s-buttons .left { left: 0; }
+        .ring.s-buttons .right { right: 0; }
         .ring .off { opacity: 0.2; pointer-events: none; }
 
         /* Miniaturer og gitterfliser: kun billede og titel (knapper og PTZ kommer i fuldskærm) */
@@ -1496,7 +1618,7 @@
         .cp {
             position: absolute;
             top: 44px; right: 10px;
-            width: 230px;
+            width: var(--cp-w, 230px);
             max-width: calc(100% - 20px);
             max-height: calc(100% - 56px);
             overflow-y: auto;
@@ -1506,10 +1628,10 @@
             display: flex;
             flex-direction: column;
             gap: 10px;
-            border-radius: 14px;
-            background: rgba(16, 18, 22, 0.82);
-            -webkit-backdrop-filter: blur(10px);
-            backdrop-filter: blur(10px);
+            border-radius: var(--cp-radius, 14px);
+            background: var(--cp-bg, rgba(16, 18, 22, 0.82));
+            -webkit-backdrop-filter: blur(var(--cp-blur, 10px));
+            backdrop-filter: blur(var(--cp-blur, 10px));
             box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
             color: #fff;
             font-size: 13px;
@@ -1523,7 +1645,18 @@
         @container (max-width: 420px) {
             .cp { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; max-width: none; transform: translateY(8px); }
         }
-        .cp.private .sec-x { display: none; }
+        .cp.private:not(.keep-others) .sec-x { display: none; }
+        /* Panelets udseende (panel_open, panel_layout): hvor det åbner, og om rækkerne står som liste eller kompakt gitter */
+        .cp.pos-bottom { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; max-width: none; max-height: calc(100% - 16px); transform: translateY(8px); }
+        .cp.pos-bottom.open { transform: none; }
+        @container (max-width: 420px) {
+            .cp.pos-under { top: 44px; left: auto; right: 10px; bottom: auto; width: var(--cp-w, 230px); max-width: calc(100% - 20px); max-height: calc(100% - 56px); transform: translateY(-6px); }
+            .cp.pos-under.open { transform: none; }
+        }
+        .cp.grid .sec-x { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+        .cp.grid .sec-x > div:not(.cp-row) { grid-column: 1 / -1; }
+        .cp.grid .sec-x > .cp-row, .cp.grid > .cp-row { flex-direction: column; justify-content: center; text-align: center; gap: 6px; padding: 10px 6px; border-radius: 10px; background: rgba(255, 255, 255, 0.08); }
+        .cp.grid .cp-row .lbl { flex: none; font-size: 12px; }
         .cp-row { display: flex; align-items: center; gap: 8px; }
         .cp-row ha-icon { --mdc-icon-size: 20px; opacity: 0.85; }
         .cp-row .lbl { flex: 1; }
@@ -1548,8 +1681,14 @@
             background: #fff;
             transition: transform 0.2s;
         }
-        .tg.on { background: var(--pn-intro, #4fd8ff); }
         .tg.on::after { transform: translateX(16px); }
+        .cp-row ha-icon, .cp-sub ha-icon { color: var(--ic, inherit); }
+        .cp-row.on ha-icon { color: var(--ic-on, var(--ic, inherit)); }
+        .tg.on { background: var(--ic-on, var(--cp-on, var(--pn-intro, #4fd8ff))); }
+        .cp-sub ha-icon { --mdc-icon-size: 16px; vertical-align: -3px; }
+        .cp .val { font-variant-numeric: tabular-nums; opacity: 0.85; }
+        .cp-sub .val { margin-left: 4px; }
+        .cp input.sl { width: 100%; margin: 0; accent-color: var(--ic-on, var(--cp-on, var(--pn-intro, #4fd8ff))); }
         .chips { display: flex; flex-wrap: wrap; gap: 6px; }
         .chip {
             padding: 4px 10px;
@@ -1561,7 +1700,7 @@
             font-size: 12px;
             cursor: pointer;
         }
-        .chip.on { background: var(--pn-intro, #4fd8ff); color: #04141a; }
+        .chip.on { background: var(--ic-on, var(--cp-on, var(--pn-intro, #4fd8ff))); color: #04141a; }
         .cp select {
             width: 100%;
             padding: 6px 8px;
@@ -1574,6 +1713,22 @@
         .cp option { color: #000; }
         .tile.mini:not(.fs) .cp-btn, .tile.mini:not(.fs) .cp, .tile.grid:not(.fs) .cp-btn, .tile.grid:not(.fs) .cp { display: none; }
         .tile.patrolling .ptz, .tile.private .ptz { display: none !important; }
+
+        /* Elementer på billedet: to søjler under titelrækken. Lagrækkefølge: video < elementer < kameraskift/knaplinje < topknapper < panel */
+        .pic-items { position: absolute; top: calc(var(--pn-title-offset, 14px) + 34px); left: 10px; right: 10px; bottom: 48px; display: flex; justify-content: space-between; pointer-events: none; z-index: 1; }
+        .pic-items .pc { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+        .pic-items .pc-r { align-items: flex-end; }
+        .pi { pointer-events: auto; box-sizing: border-box; min-width: 34px; height: 34px; padding: 0; border: 0; border-radius: 17px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+            background: rgba(0, 0, 0, 0.4); color: var(--ic, #fff); font: inherit; font-size: 13px; opacity: 0.85; cursor: pointer; -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+        .pi:hover { opacity: 1; }
+        .pi ha-icon { --mdc-icon-size: 20px; }
+        .pi.on { background: var(--ic-on, var(--cp-on, var(--pn-intro, #4fd8ff))); color: #04141a; opacity: 1; }
+        .pi-val, .pi-txt { padding: 0 10px; gap: 6px; }
+        .pi-val { cursor: default; pointer-events: none; color: #fff; }
+        .pi .pn { white-space: nowrap; }
+        .pi-val ha-icon { color: var(--ic, #fff); }
+        .tile.private:not(.keep-others) .pic-items .pi:not(.pi-priv) { display: none; }
+        .tile.mini:not(.fs) .pic-items, .tile.grid:not(.fs) .pic-items { display: none; }
 
         /* Privatlivsdækning */
         .cover {
@@ -1619,6 +1774,11 @@
             z-index: 2;
         }
         .tile.intro .readout { opacity: 0; transition: none; }
+        /* Under startanimationen vises kun animationen: knapper, titel, elementer, panel og PTZ toner ind bagefter */
+        .tile.intro .header, .tile.intro .controls, .tile.intro .ptz, .tile.intro .pic-items, .tile.intro .cl-b, .tile.intro .cl-bc, .tile.intro .cp-btn { opacity: 0 !important; pointer-events: none !important; }
+        .tile.intro .header *, .tile.intro .controls *, .tile.intro .ptz *, .tile.intro .pic-items * { pointer-events: none !important; }
+        .tile.intro-reveal .header, .tile.intro-reveal .controls, .tile.intro-reveal .ptz, .tile.intro-reveal .pic-items, .tile.intro-reveal .cl-b, .tile.intro-reveal .cl-bc { animation: pn-ui-in 0.5s ease-out backwards; }
+        @keyframes pn-ui-in { from { opacity: 0; } }
         .readout.has-ui { bottom: 38px; }
         .tile.mini:not(.fs) .readout, .tile.grid:not(.fs) .readout { display: none; }
 
@@ -1691,7 +1851,9 @@
         ha-card.fsmode .wall { position: absolute; inset: 0; display: block; }
         ha-card.fsmode .tile { position: absolute; inset: 0; border-radius: 0; opacity: 0; pointer-events: none; z-index: 0; cursor: default; }
         ha-card.fsmode .tile.fs { opacity: 1; pointer-events: auto; z-index: 1; }
-        ha-card.fsmode .tile.fs panoptes-player video { object-fit: contain !important; }
+        ha-card.fsmode .tile.fs panoptes-player video { object-fit: var(--pn-fit-fs, contain) !important; }
+        /* Det frosne billede, mens HD indlæses, følger flisens fyldning. Det tages, før flisen er markeret som fuldskærm, og ville ellers blive stående med kortets almindelige fyldning, til HD tager over. */
+        ha-card.fsmode .tile.fs canvas.snap.follow { object-fit: var(--pn-fit-fs, contain) !important; }
         ha-card.fsmode .nav { display: none; }
 
         /* Kameraskift i fuldskærm */
@@ -1861,12 +2023,17 @@
                     <div class="header">
                         <div class="h-left">${cl('top-left')}${!bottom && side === 'left' ? titleHtml : ''}</div>
                         <div class="h-center">${cl('top-center')}${!bottom && side === 'center' ? titleHtml : ''}</div>
-                        <div class="h-right">${cl('top-right')}${!bottom && side === 'right' ? titleHtml : ''}${this._hasPanel() ? '<button class="cp-btn" type="button" aria-label="' + tr('tile.control_panel') + '"><ha-icon icon="mdi:tune-variant"></ha-icon></button>' : ''}<button class="quality" type="button" hidden></button>${this.card._carActive && this.card._carActive() && o.carPause ? '<button class="car-pause" type="button"><ha-icon icon="mdi:pause"></ha-icon></button>' : ''}</div>
+                        <div class="h-right">${cl('top-right')}${!bottom && side === 'right' ? titleHtml : ''}${this.card._carActive && this.card._carActive() && o.carPause ? '<button class="car-pause" type="button"><ha-icon icon="mdi:pause"></ha-icon></button>' : ''}${this._hasPanel() ? '<button class="cp-btn" type="button" aria-label="' + tr('tile.control_panel') + '"><ha-icon icon="mdi:tune-variant"></ha-icon></button>' : ''}<button class="quality" type="button" hidden></button></div>
                     </div>
                     ${bottom ? `<div class="bottom-title">${titleHtml}</div>` : ''}
                     ${o.camLabel ? `<div class="cl-b">${cl('bottom-left')}${cl('bottom-right')}</div><div class="cl-bc">${cl('bottom-center')}</div>` : ''}
                 </div>`;
             // Nederste mærke ligger over den tekniske udlæsning og knapperne
+            // Billedfyldning: kameraets eget valg vinder over kortets (kort og fuldskærm hver for sig)
+            el.style.setProperty('--pn-fit', this.cam.fit || o.fit);
+            // Fuldskærm på en berøringsskærm (telefon, tablet) kan have sit eget valg: kameraets berøringsvalg, kameraets fuldskærmsvalg, kortets berøringsvalg, kortets fuldskærmsvalg
+            const touch = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+            el.style.setProperty('--pn-fit-fs', (touch && this.cam.fitFsTouch) || this.cam.fitFs || (touch && o.fitFsTouch) || o.fitFs);
             el.style.setProperty('--pn-clb', (o.readout.length ? (o.ui ? 58 : 30) : (o.ui ? 38 : 10)) + 'px');
 
             const q = sel => el.querySelector(sel);
@@ -1909,7 +2076,7 @@
             // Klik: miniature bliver hovedkamera, gitterflise åbner fuldskærm
             this.ui.player.addEventListener('click', ev => {
                 if (el.classList.contains('fs')) return;
-                if (ev.target.closest && ev.target.closest('.quality, .car-pause, .controls, .ptz, .cp, .cp-btn')) return;
+                if (ev.target.closest && ev.target.closest('.quality, .car-pause, .controls, .ptz, .cp, .cp-btn, .pic-items')) return;
                 if (this.role === 'mini') this.card._focusCamera(this.idx);
                 else if (this.role === 'grid' && !el.classList.contains('fs')) this.enterFs();
             });
@@ -1935,19 +2102,18 @@
             if (this.cam.ptz) this._buildPtz();
             if (this.o.ui) this._buildControls();
             if (this.o.readout.length) this._buildReadout();
-            if (this.cam.control) this._buildControl();
+            if (this.cam.control || this.cam.panelItems.length) this._buildControl();
             if (this.o.zoom) this._initZoom();
         }
 
         /* ---------- Kontrolpanel og privatliv ---------- */
 
         _hasPanel() {
-            const c = this.cam.control;
-            return !!c && this.o.panel && CONTROL_KEYS.some(k => c[k]);
+            return this.o.panel && this._items().some(it => it.inPanel !== false || it.onPicture !== 'none' && it.onPicture !== undefined);
         }
 
         _buildControl() {
-            const c = this.cam.control;
+            const c = this.cam.control || {};
             const player = this.ui.player;
 
             if (c.privacy && this.o.privacyCover !== 'none') {
@@ -1970,6 +2136,7 @@
                 player.appendChild(cp);
                 this.ui.cp = cp;
                 this.ui.cpBtn = this.el.querySelector('.cp-btn');
+                this._cpStyle(cp);
 
                 const setOpen = open => {
                     cp.classList.toggle('open', open);
@@ -1981,7 +2148,7 @@
                 });
                 // Klik på billedet lukker panelet
                 player.addEventListener('click', ev => {
-                    if (!ev.target.closest || ev.target.closest('.cp, .cp-btn')) return;
+                    if (!ev.target.closest || ev.target.closest('.cp, .cp-btn, .pic-items')) return;
                     setOpen(false);
                 });
                 cp.addEventListener('click', ev => {
@@ -1991,9 +2158,62 @@
                     this._cpAct(b.dataset.act, b.dataset.k, b.dataset.v);
                 });
                 cp.addEventListener('change', ev => {
-                    const sel = ev.target;
-                    if (sel && sel.dataset && sel.dataset.sel) this._cpAct('opt', sel.dataset.sel, sel.value);
+                    const el = ev.target;
+                    if (!el || !el.dataset) return;
+                    if (el.dataset.sel) this._cpAct('opt', el.dataset.sel, el.value);
+                    else if (el.dataset.sl) {
+                        this._cpDrag = false;
+                        this._cpAct(el.dataset.sa, el.dataset.sl, el.value);
+                    }
                 });
+                // Skydere: mens de trækkes, vises værdien, og panelet tegnes ikke om; tjenesten kaldes først, når de slippes
+                cp.addEventListener('input', ev => {
+                    const el = ev.target;
+                    if (!el || !el.dataset || !el.dataset.sl) return;
+                    this._cpDrag = true;
+                    const v = el.parentNode.querySelector('.val');
+                    if (v) v.textContent = el.value + (el.dataset.unit || '');
+                });
+                cp.addEventListener('pointerdown', ev => {
+                    if (ev.target && ev.target.matches && ev.target.matches('input[type=range]')) this._cpDrag = true;
+                });
+                cp.addEventListener('pointerup', () => { this._cpDrag = false; });
+                cp.addEventListener('pointercancel', () => { this._cpDrag = false; });
+                // Panelet og elementerne på billedet fanger al berøring og al museklik: intet når videre til billedet, swipe, zoom eller knapperne bagved
+                swallowEvents(cp);
+            }
+
+            if (this.o.privacyKeep) this.el.classList.add('keep-others');
+            // Elementer på billedet: to søjler (venstre og højre) lige under titelrækken
+            if (this._items().some(it => it.onPicture === 'left' || it.onPicture === 'right')) {
+                const pic = document.createElement('div');
+                pic.className = 'pic-items';
+                pic.innerHTML = '<div class="pc pc-l"></div><div class="pc pc-r"></div>';
+                // PTZ-ringen i et af de øverste hjørner: søjlerne starter under den
+                const zp = this.cam.ptz;
+                if (zp && /^top-/.test(zp.pos)) pic.style.top = `calc(var(--pn-title-offset, 14px) + ${34 + 80 * PTZ_SIZES[zp.size] + 8}px)`;
+                player.appendChild(pic);
+                this.ui.pic = pic;
+                swallowEvents(pic);
+                pic.addEventListener('click', ev => {
+                    ev.stopPropagation();
+                    const b = ev.target.closest && ev.target.closest('[data-act]');
+                    if (b) this._cpAct(b.dataset.act, b.dataset.k, b.dataset.v);
+                });
+                // Antallet pr. søjle afhænger af højden: ændres den, tegnes søjlerne og panelet igen (overskydende elementer går til panelet)
+                if (window.ResizeObserver) {
+                    const ro = new ResizeObserver(() => {
+                        cancelAnimationFrame(this._picRAF);
+                        this._picRAF = requestAnimationFrame(() => {
+                            if (this._picCap() === this._cpCap) return;
+                            this._cpSig = null;
+                            this._cpObjs = null;
+                            this.refreshControl();
+                        });
+                    });
+                    ro.observe(player);
+                    this.cleanups.push(() => { ro.disconnect(); cancelAnimationFrame(this._picRAF); });
+                }
             }
 
             this._cpSig = null;
@@ -2001,58 +2221,229 @@
             this.refreshControl();
         }
 
+        /** Panelets udseende ud fra kortets indstillinger. Kun afvigelser fra standarden sætter noget. */
+        _cpStyle(cp) {
+            const o = this.o;
+            const st = cp.style;
+            if (o.panelBg === 'solid') {
+                st.setProperty('--cp-bg', 'rgb(22, 24, 28)');
+                st.setProperty('--cp-blur', '0px');
+            } else if (o.panelBg === 'clear') {
+                st.setProperty('--cp-bg', `rgba(16, 18, 22, ${Math.min(o.panelOpacity, 0.35)})`);
+                st.setProperty('--cp-blur', '14px');
+            } else if (o.panelOpacity !== 0.82) st.setProperty('--cp-bg', `rgba(16, 18, 22, ${o.panelOpacity})`);
+            if (o.panelRadius !== 14) st.setProperty('--cp-radius', o.panelRadius + 'px');
+            if (o.panelWidth !== 230) st.setProperty('--cp-w', o.panelWidth + 'px');
+            if (o.panelColorOn) this.el.style.setProperty('--cp-on', o.panelColorOn);
+            if (o.panelLayout === 'grid') cp.classList.add('grid');
+            if (o.panelOpen === 'bottom') cp.classList.add('pos-bottom');
+            else if (o.panelOpen === 'under_button') cp.classList.add('pos-under');
+            if (o.privacyKeep) {
+                cp.classList.add('keep-others');
+            }
+        }
+
+        /**
+         * Hvor mange elementer der er plads til i hver søjle på billedet. Søjlerne starter under titelrækken og må aldrig nå
+         * PTZ-ringen eller kameraskift-pilene midt i siderne; uden dem må de ned til knaplinjen i bunden.
+         */
+        _picCap() {
+            const h = this.ui.player ? this.ui.player.clientHeight : 0;
+            if (!h) return 99;
+            const o = this.o;
+            const ptz = this.cam.ptz;
+            // Midt til højre/venstre spærrer midten; i et hjørne tager ringen plads i den ende; øverst, nederst og midt ligger mellem søjlerne
+            const midBlocked = (!!ptz && (ptz.pos === 'right' || ptz.pos === 'left')) || (o.nav && o.navPos === 'sides' && this.card._cams.length > 1);
+            const corner = !!ptz && /^(top|bottom)-/.test(ptz.pos) ? 80 * PTZ_SIZES[ptz.size] + 8 : 0;
+            const top = (parseFloat(getComputedStyle(this.ui.player).getPropertyValue('--pn-title-offset')) || 14) + 34;
+            const half = !!ptz && (ptz.pos === 'right' || ptz.pos === 'left') ? 40 * PTZ_SIZES[ptz.size] : 40;
+            const room = midBlocked ? h / 2 - half - top - 8 : h - top - 56 - corner;
+            return Math.max(0, Math.floor((room + 8) / 42));
+        }
+
+        /**
+         * Elementerne i kameraets panel. Hvert element har et id (bruges i panelets knapper), en entitet og en visning.
+         * Standardpanelet er de fem faste felter (control) udtrykt som elementer; panel_mode vælger, om egne elementer
+         * (panel_items) kommer til: default = kun standardpanelet, extra = standard + egne, custom = kun egne.
+         * Privatliv er den eneste særlige type (peger på kameraets privatlivsfelt). hidePtz: skjuler PTZ-pilene, når elementet er tændt.
+         */
+        _items() {
+            const c = this.cam.control;
+            const mode = this.cam.panelMode;
+            const items = [];
+            if (c && mode !== 'custom') {
+                if (c.privacy) items.push({id: 'privacy', type: 'privacy', entity: c.privacy, icon: 'mdi:shield-lock-outline', name: tr('tile.cp.privacy'), display: 'toggle'});
+                if (c.preset) items.push({id: 'preset', type: 'entity', entity: c.preset, name: tr('tile.cp.position'), display: 'select'});
+                if (c.patrol) items.push({id: 'patrol', type: 'entity', entity: c.patrol, icon: 'mdi:rotate-right', name: tr('tile.cp.patrol'), display: 'toggle', hidePtz: true});
+                if (c.patrol_mode) items.push({id: 'patrol_mode', type: 'entity', entity: c.patrol_mode, name: tr('tile.cp.patrol_mode'), display: 'chips'});
+                if (c.light) items.push({id: 'light', type: 'entity', entity: c.light, icon: 'mdi:light-flood-down', name: tr('tile.cp.light'), display: 'toggle'});
+            }
+            if (mode !== 'default') {
+                this.cam.panelItems.forEach(it => {
+                    if (it.type === 'privacy') {
+                        // Privatliv tilføjes kun i eget panel, og kun hvis kameraet har et privatlivsfelt
+                        if (mode === 'custom' && c && c.privacy) items.push(Object.assign({}, it, {entity: c.privacy, display: 'toggle', name: it.name || tr('tile.cp.privacy'), icon: it.icon || 'mdi:shield-lock-outline'}));
+                    } else items.push(it);
+                });
+            }
+            return items;
+        }
+
         _cpAct(act, key, val) {
             const h = this.card._hass;
-            const id = this.cam.control && this.cam.control[key];
+            const it = this._items().find(i => i.id === key);
+            const id = it && it.entity;
             if (!h || !id) return;
-            if (act === 'toggle') h.callService(id.split('.')[0], 'toggle', {entity_id: id});
-            else if (act === 'opt') h.callService('select', 'select_option', {entity_id: id, option: val});
+            const dom = id.split('.')[0];
+            if (act === 'toggle' && TOGGLE_DOM.includes(dom)) h.callService(dom, 'toggle', {entity_id: id});
+            else if (act === 'opt' && SELECT_DOM.includes(dom)) h.callService(dom, 'select_option', {entity_id: id, option: val});
+            else if (act === 'press') {
+                if (dom === 'button' || dom === 'input_button') h.callService(dom, 'press', {entity_id: id});
+                else if (dom === 'script' || dom === 'scene') h.callService(dom, 'turn_on', {entity_id: id});
+            } else if (act === 'set' && NUM_DOM.includes(dom)) {
+                const v = parseFloat(val);
+                if (Number.isFinite(v)) h.callService(dom, 'set_value', {entity_id: id, value: v});
+            } else if (act === 'dim' && dom === 'light') {
+                const v = parseFloat(val);
+                if (Number.isFinite(v)) h.callService('light', 'turn_on', {entity_id: id, brightness_pct: clamp(Math.round(v), 1, 100)});
+            }
         }
 
         /** Opdaterer panel og dækning ud fra entiteternes tilstand (kun når noget er ændret). */
         refreshControl() {
-            const c = this.cam.control;
+            if (this._cpDrag) return;   // en skyder trækkes lige nu: panelet tegnes ikke om under fingeren
+            const items = this._items();
+            const c = this.cam.control || {};
             const h = this.card._hass;
-            if (!c || !h) return;
+            // Kameraets privatlivsfelt følges altid, også når kontakten ikke er lagt i panelet
+            const ents = items.map(it => it.entity);
+            if (c.privacy && !ents.includes(c.privacy)) ents.push(c.privacy);
+            if (!ents.length || !h) return;
             // HA udskifter kun en entitets tilstandsobjekt, når noget i den ændrer sig. Er alle objekterne de samme som sidst, er der intet at gøre.
-            const objs = CONTROL_KEYS.map(k => (c[k] && h.states[c[k]]) || null);
-            if (this._cpObjs && objs.every((o, i) => o === this._cpObjs[i])) return;
+            const objs = ents.map(e => h.states[e] || null);
+            if (this._cpObjs && this._cpObjs.length === objs.length && objs.every((o, i) => o === this._cpObjs[i])) return;
             this._cpObjs = objs;
-            const S = k => (c[k] && h.states[c[k]]) || null;
-            const sig = CONTROL_KEYS.map(k => {
-                const st = S(k);
-                return st ? st.state + '|' + ((st.attributes && st.attributes.options) || []).join(',') : '-';
-            }).join(';');
+            const cap = this._picCap();
+            const sig = cap + '#' + objs.map(st => st ? st.state + '|' + ((st.attributes && st.attributes.options) || []).join(',') + '|' + ((st.attributes && (st.attributes.brightness || st.attributes.unit_of_measurement)) || '') : '-').join(';');
             if (sig === this._cpSig) return;
             this._cpSig = sig;
+            this._cpCap = cap;
 
-            const priv = !!S('privacy') && S('privacy').state === 'on';
-            const patrolling = !!S('patrol') && S('patrol').state === 'on';
+            const isOn = it => { const st = h.states[it.entity]; return !!st && st.state === 'on'; };
+            const pst = c.privacy && h.states[c.privacy];
+            const priv = !!pst && pst.state === 'on';
+            const ptzOff = items.some(it => it.hidePtz && ONOFF_DOM.includes(it.entity.split('.')[0]) && isOn(it));
             this.el.classList.toggle('private', priv);
-            this.el.classList.toggle('patrolling', patrolling);
+            this.el.classList.toggle('patrolling', ptzOff);
             if (priv) this._fxStart();
             else this._fxStop();
 
-            if (!this.ui.cp) return;
-            const row = (icon, label, key, on) =>
-                `<div class="cp-row"><ha-icon icon="${icon}"></ha-icon><span class="lbl">${label}</span><button class="tg${on ? ' on' : ''}" type="button" role="switch" aria-checked="${on}" aria-label="${label}" data-act="toggle" data-k="${key}"></button></div>`;
-            const chips = (key, st, title) => {
+            const nameOf = (it, st) => it.name || (st.attributes && st.attributes.friendly_name) || it.entity;
+            const iconOf = (it, st) => it.icon || (st.attributes && st.attributes.icon) || DOMAIN_ICON[it.entity.split('.')[0]] || 'mdi:circle-outline';
+            const styleOf = it => {
+                const v = [];
+                if (it.color) v.push('--ic:' + it.color);
+                if (it.colorOn) v.push('--ic-on:' + it.colorOn);
+                return v.length ? ` style="${esc(v.join(';'))}"` : '';
+            };
+            const sub = (it, st, extra) => `<div class="cp-sub">${it.icon ? `<ha-icon icon="${esc(it.icon)}"></ha-icon> ` : ''}${esc(nameOf(it, st))}${extra || ''}</div>`;
+            const row = (it, st, on) =>
+                `<div class="cp-row${on && it.custom ? ' on' : ''}"${styleOf(it)}><ha-icon icon="${esc(iconOf(it, st))}"></ha-icon><span class="lbl">${esc(nameOf(it, st))}</span><button class="tg${on ? ' on' : ''}" type="button" role="switch" aria-checked="${on}" aria-label="${esc(nameOf(it, st))}" data-act="toggle" data-k="${it.id}"></button></div>`;
+            const chips = (it, st, kind) => {
                 const opts = (st.attributes && st.attributes.options) || [];
                 if (!opts.length) return '';
                 const style = this.o.presetStyle === 'auto' ? (opts.length > 6 ? 'dropdown' : 'buttons') : this.o.presetStyle;
-                if (key === 'patrol_mode' || style === 'buttons') {
-                    return `<div><div class="cp-sub">${title}</div><div class="chips">${opts.map(o => `<button class="chip${o === st.state ? ' on' : ''}" type="button" data-act="opt" data-k="${key}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div></div>`;
+                if (kind === 'chips' || (kind === 'select' && style === 'buttons')) {
+                    return `<div${styleOf(it)}>${sub(it, st)}<div class="chips">${opts.map(o => `<button class="chip${o === st.state ? ' on' : ''}" type="button" data-act="opt" data-k="${it.id}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div></div>`;
                 }
-                return `<div><div class="cp-sub">${title}</div><select data-sel="${key}">${opts.map(o => `<option value="${esc(o)}"${o === st.state ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select></div>`;
+                return `<div${styleOf(it)}>${sub(it, st)}<select data-sel="${it.id}">${opts.map(o => `<option value="${esc(o)}"${o === st.state ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select></div>`;
+            };
+            const unitOf = st => (st.attributes && st.attributes.unit_of_measurement) ? ' ' + st.attributes.unit_of_measurement : '';
+            // Tilstandens tekst: HA's egen oversættelse, hvis den findes, ellers til/fra på kortets sprog
+            const stateTxt = st => {
+                if (typeof h.formatEntityState === 'function') {
+                    try { const t = h.formatEntityState(st); if (t) return String(t); } catch (e) { /* bruger reserven nedenfor */ }
+                }
+                if (st.state === 'on' || st.state === 'off') return tr(st.state === 'on' ? 'tile.cp.on' : 'tile.cp.off');
+                return st.state + unitOf(st);
+            };
+            const numSlider = (it, st) => {
+                const a = st.attributes || {};
+                const min = Number.isFinite(parseFloat(a.min)) ? parseFloat(a.min) : 0;
+                const max = Number.isFinite(parseFloat(a.max)) ? parseFloat(a.max) : 100;
+                const step = parseFloat(a.step) > 0 ? parseFloat(a.step) : 1;
+                const v = parseFloat(st.state);
+                const val = Number.isFinite(v) ? v : min;
+                return `<div${styleOf(it)}>${sub(it, st, ` <span class="val">${esc(val + unitOf(st))}</span>`)}<input type="range" class="sl" data-sl="${it.id}" data-sa="set" data-unit="${esc(unitOf(st))}" min="${min}" max="${max}" step="${step}" value="${val}"></div>`;
+            };
+            const dimSlider = (it, st) => {
+                const b = st.attributes && st.attributes.brightness;
+                const pct = Number.isFinite(parseFloat(b)) ? clamp(Math.round(parseFloat(b) / 2.55), 1, 100) : (st.state === 'on' ? 100 : 1);
+                return `<div><input type="range" class="sl" data-sl="${it.id}" data-sa="dim" min="1" max="100" step="1" value="${pct}" aria-label="${esc(nameOf(it, st))}"></div>`;
+            };
+            const render = (it, st) => {
+                const kind = itemDisplay(it, st);
+                if (kind === 'toggle') return row(it, st, isOn(it));
+                if (kind === 'light-slider') return row(it, st, isOn(it)) + dimSlider(it, st);
+                if (kind === 'select' || kind === 'chips' || kind === 'dropdown') return chips(it, st, kind);
+                if (kind === 'slider') return numSlider(it, st);
+                if (kind === 'button') return `<div class="cp-row"${styleOf(it)}><ha-icon icon="${esc(iconOf(it, st))}"></ha-icon><span class="lbl">${esc(nameOf(it, st))}</span><button class="chip" type="button" data-act="press" data-k="${it.id}">${tr('tile.cp.press')}</button></div>`;
+                const txt = stateTxt(st);
+                return `<div class="cp-row${st.state === 'on' && it.custom ? ' on' : ''}"${styleOf(it)}><ha-icon icon="${esc(iconOf(it, st))}"></ha-icon><span class="lbl">${esc(nameOf(it, st))}</span><span class="val">${esc(txt)}</span></div>`;
             };
 
+            // Elementer på billedet: kontakter og trykknapper styres direkte, alt andet vises som aflæsning. Er søjlen fuld, går resten til panelet.
+            const overflow = new Set();
+            if (this.ui.pic) {
+                const cols = {left: [], right: []};
+                items.forEach(it => {
+                    if (it.onPicture !== 'left' && it.onPicture !== 'right') return;
+                    if (!h.states[it.entity]) return;
+                    if (cols[it.onPicture].length < cap) cols[it.onPicture].push(it);
+                    else overflow.add(it.id);
+                });
+                const pic = it => {
+                    const st = h.states[it.entity];
+                    const kind = itemDisplay(it, st);
+                    const nm = esc(nameOf(it, st));
+                    const ic = `<ha-icon icon="${esc(iconOf(it, st))}"></ha-icon>`;
+                    const cls = 'pi' + (it.type === 'privacy' ? ' pi-priv' : '');
+                    const act = kind === 'toggle' || kind === 'light-slider' ? 'toggle' : kind === 'button' ? 'press' : '';
+                    // Hvad der vises: standard er kun ikon på kontakter og knapper, og ikon + værdi på aflæsninger
+                    const mode = it.picShow === 'auto' || !it.picShow ? (act ? 'icon' : 'icon_value') : it.picShow;
+                    const val = kind === 'button' ? '' : kind === 'slider' ? parseFloat(st.state) + unitOf(st) : stateTxt(st);
+                    let showIcon = mode !== 'value' && mode !== 'name';
+                    const showName = mode === 'name' || mode === 'name_icon_value';
+                    const showVal = !!val && (mode === 'value' || mode === 'icon_value' || mode === 'name_icon_value');
+                    if (!showIcon && !showName && !showVal) showIcon = true;
+                    const inner = (showIcon ? ic : '') + (showName ? `<span class="pn">${nm}</span>` : '') + (showVal ? `<span class="pv">${esc(val)}</span>` : '');
+                    const txt = showName || showVal ? ' pi-txt' : '';
+                    if (act) {
+                        const on = isOn(it);
+                        return `<button class="${cls}${txt}${on ? ' on' : ''}" type="button" data-act="${act}" data-k="${it.id}"${act === 'toggle' ? ` aria-pressed="${on}"` : ''} aria-label="${nm}" title="${nm}"${styleOf(it)}>${inner}</button>`;
+                    }
+                    return `<div class="pi pi-val" title="${nm}"${styleOf(it)}>${inner}</div>`;
+                };
+                this.ui.pic.querySelector('.pc-l').innerHTML = cols.left.map(pic).join('');
+                this.ui.pic.querySelector('.pc-r').innerHTML = cols.right.map(pic).join('');
+            }
+
+            // Panelet: privatliv står øverst, uden for den del, der skjules, når privatliv er slået til
+            const panelItems = items.filter(it => it.inPanel !== false || overflow.has(it.id));
+            if (this.ui.cpBtn) {
+                this.ui.cpBtn.hidden = !panelItems.length;
+                if (!panelItems.length) this.ui.cp.classList.remove('open');
+            }
+            if (!this.ui.cp) return;
             let html = '';
-            if (S('privacy')) html += row('mdi:shield-lock-outline', tr('tile.cp.privacy'), 'privacy', priv);
             let more = '';
-            if (S('preset')) more += chips('preset', S('preset'), tr('tile.cp.position'));
-            if (S('patrol')) more += row('mdi:rotate-right', tr('tile.cp.patrol'), 'patrol', patrolling);
-            if (S('patrol_mode')) more += chips('patrol_mode', S('patrol_mode'), tr('tile.cp.patrol_mode'));
-            if (S('light')) more += row('mdi:light-flood-down', tr('tile.cp.light'), 'light', S('light').state === 'on');
+            for (const it of panelItems) {
+                const st = h.states[it.entity];
+                if (!st) continue;
+                const part = render(it, st);
+                if (it.type === 'privacy') html += part;
+                else more += part;
+            }
             if (more) html += `<div class="sec-x">${more}</div>`;
             this.ui.cp.classList.toggle('private', priv);
             this.ui.cp.innerHTML = html || '<div class="cp-sub">' + tr('tile.cp.none') + '</div>';
@@ -2326,8 +2717,6 @@
             const btn = this.ui.quality;
             btn.hidden = this.cam.streams.length < 2;
             btn.textContent = this._label(this.streamIdx);
-            const hr = btn.parentNode;
-            if (hr) hr.classList.toggle('q2', !btn.hidden);
         }
 
         syncQuality() {
@@ -2574,6 +2963,10 @@
                         const g = c.getContext('2d');
                         g.fillStyle = '#000';
                         g.fillRect(0, 0, cw, ch);
+                        if (src.style.objectFit === 'fill') {
+                            g.drawImage(src, 0, 0, cw, ch);
+                            return c;
+                        }
                         const s = (src.style.objectFit === 'cover' ? Math.max : Math.min)(cw / src.width, ch / src.height);
                         g.drawImage(src, (cw - src.width * s) / 2, (ch - src.height * s) / 2, src.width * s, src.height * s);
                         return c;
@@ -2725,7 +3118,10 @@
 
         _applyAndReload() {
             const snap = this._snapshot();
-            if (snap) this.beginSwap(snap, 'soft', 0, true);
+            if (snap) {
+                snap.classList.add('follow');
+                this.beginSwap(snap, 'soft', 0, true);
+            }
             this.state = 'loading';
             this._showLoading();
             this._applyStream();
@@ -3028,8 +3424,11 @@
                 `<ha-icon class="${d}${ptz.data[d] ? '' : ' off'}" data-dir="${d}" icon="${DIR_ICONS[d]}"></ha-icon>`
             ).join('');
 
+            let vars = `--pn-ptz-opacity: ${ptz.opacity}`;
+            if (ptz.size !== 'medium') vars += `; --pn-ptz-scale: ${PTZ_SIZES[ptz.size]}`;
+            if (ptz.color) vars += `; --pn-ptz-color: ${ptz.color}`;
             this.ui.player.insertAdjacentHTML('beforeend',
-                `<div class="ptz" style="--pn-ptz-opacity: ${ptz.opacity}"><div class="ring">${icons}</div></div>`);
+                `<div class="ptz p-${ptz.pos}" style="${vars}"><div class="ring s-${ptz.style}">${icons}</div></div>`);
 
             const [domain, service] = ptz.service.split('.', 2);
             this.el.querySelector('.ptz').addEventListener('click', ev => {
@@ -3078,7 +3477,7 @@
                 apply();
             };
 
-            const skip = ev => !this.big || (!!ev.target.closest && !!ev.target.closest('.ptz, .controls, .quality, .car-pause, .cp, .cp-btn'));
+            const skip = ev => !this.big || (!!ev.target.closest && !!ev.target.closest('.ptz, .controls, .quality, .car-pause, .cp, .cp-btn, .pic-items'));
 
             area.addEventListener('wheel', ev => {
                 if (skip(ev)) return;
@@ -3268,7 +3667,10 @@
                 background: !!c.background,
                 showStatus: !!c.show_status,
                 poster: c.poster || '',
-                ar: /^\d+(\.\d+)?\s*\/\s*\d+(\.\d+)?$/.test(ar) ? ar : '16/9',
+                ar: AR_RE.test(ar) ? ar : '16/9',
+                fit: FITS.includes(c.video_fit) ? c.video_fit : 'contain',
+                fitFs: FITS.includes(c.video_fit_fs) ? c.video_fit_fs : 'contain',
+                fitFsTouch: FITS.includes(c.video_fit_fs_touch) ? c.video_fit_fs_touch : '',
                 camLabel: c.cam_label === true,
                 camLabelStyle: CL_STYLES.includes(c.cam_label_style) ? c.cam_label_style : 'pill',
                 camLabelText: c.cam_label_text === 'name' ? 'name' : 'number',
@@ -3311,6 +3713,14 @@
                 fsModes: Array.isArray(c.fullscreen_nav_modes) ? c.fullscreen_nav_modes.filter(k => FS_MODES.includes(k)) : FS_MODES_DEFAULT.slice(),
                 panel: c.control_panel !== false,
                 presetStyle: ['buttons', 'dropdown'].includes(c.preset_style) ? c.preset_style : 'auto',
+                panelOpen: ['under_button', 'bottom'].includes(c.panel_open) ? c.panel_open : 'auto',
+                panelLayout: c.panel_layout === 'grid' ? 'grid' : 'list',
+                panelBg: ['solid', 'clear'].includes(c.panel_bg) ? c.panel_bg : 'glass',
+                panelOpacity: Number.isFinite(parseFloat(c.panel_opacity)) ? clamp(parseFloat(c.panel_opacity), 0.3, 1) : 0.82,
+                panelRadius: Number.isFinite(parseFloat(c.panel_radius)) ? clamp(parseFloat(c.panel_radius), 0, 32) : 14,
+                panelWidth: Number.isFinite(parseFloat(c.panel_width)) ? clamp(parseFloat(c.panel_width), 160, 360) : 230,
+                panelColorOn: (c.panel_color_on === 'custom' && typeof c.panel_color_on_custom === 'string' && COLOR_RE.test(c.panel_color_on_custom.trim())) ? c.panel_color_on_custom.trim() : '',
+                privacyKeep: c.privacy_hides_others === false,
                 privacySmall: c.privacy_cover_small !== false,
                 privacyQuality: PRIVACY_QUALITY.includes(c.privacy_cover_quality) ? c.privacy_cover_quality : 'normal',
                 privacyCover: PRIVACY_COVERS.includes(c.privacy_cover) ? c.privacy_cover : 'black',
@@ -3356,6 +3766,31 @@
             return Object.keys(out).length ? out : null;
         }
 
+        /** Egne elementer i panelet (panel_items): kun gyldige elementer beholdes. */
+        _panelItemsFrom(list) {
+            if (!Array.isArray(list)) return [];
+            const col = v => (typeof v === 'string' && COLOR_RE.test(v.trim())) ? v.trim() : '';
+            const out = [];
+            list.forEach((raw, n) => {
+                if (!raw || typeof raw !== 'object') return;
+                const type = raw.type === 'privacy' ? 'privacy' : 'entity';
+                const entity = (typeof raw.entity === 'string' && ENTITY_RE.test(raw.entity)) ? raw.entity : '';
+                if (type === 'entity' && !entity) return;
+                out.push({
+                    id: 'i' + n, type, custom: true, entity,
+                    name: typeof raw.name === 'string' ? raw.name.trim().slice(0, 40) : '',
+                    icon: (typeof raw.icon === 'string' && ICON_RE.test(raw.icon)) ? raw.icon : '',
+                    color: col(raw.color), colorOn: col(raw.color_on),
+                    display: DISPLAYS.includes(raw.display) ? raw.display : 'auto',
+                    inPanel: raw.in_panel !== false,
+                    onPicture: ['left', 'right'].includes(raw.on_picture) ? raw.on_picture : 'none',
+                    hidePtz: raw.hide_ptz === true,
+                    picShow: PIC_SHOWS.includes(raw.pic_show) ? raw.pic_show : 'auto',
+                });
+            });
+            return out;
+        }
+
         /** Omsætter ptz-opsætningen til det, en flise skal bruge (eller null). */
         _ptzFrom(ptz) {
             if (!ptz || ptz.enabled === false || typeof ptz.service !== 'string' || ptz.service.indexOf('.') < 1) return null;
@@ -3365,7 +3800,14 @@
             });
             if (!Object.keys(data).length) return null;
             const op = parseFloat(ptz.opacity);
-            return {service: ptz.service, data, opacity: op >= 0 && op <= 1 ? op : 0.4};
+            const custom = ptz.color === 'custom' && typeof ptz.color_custom === 'string' && COLOR_RE.test(ptz.color_custom.trim()) ? ptz.color_custom.trim() : '';
+            return {
+                service: ptz.service, data, opacity: op >= 0 && op <= 1 ? op : 0.4,
+                style: PTZ_STYLES.includes(ptz.style) ? ptz.style : 'ring',
+                size: PTZ_SIZES[ptz.size] ? ptz.size : 'medium',
+                pos: PTZ_POSITIONS.includes(ptz.pos) ? ptz.pos : 'right',
+                color: ptz.color === 'accent' ? 'var(--primary-color, #03a9f4)' : custom,
+            };
         }
 
         /**
@@ -3388,6 +3830,11 @@
                     streams,
                     ptz: this._ptzFrom(cam.ptz || (i === 0 ? config.ptz : null)),
                     control: this._controlFrom(cam.control),
+                    panelMode: ['extra', 'custom'].includes(cam.panel_mode) ? cam.panel_mode : 'default',
+                    panelItems: this._panelItemsFrom(cam.panel_items),
+                    fit: FITS.includes(cam.video_fit) ? cam.video_fit : '',
+                    fitFs: FITS.includes(cam.video_fit_fs) ? cam.video_fit_fs : '',
+                    fitFsTouch: FITS.includes(cam.video_fit_fs_touch) ? cam.video_fit_fs_touch : '',
                 };
             });
         }
@@ -3740,7 +4187,7 @@
                 let sx = 0;
                 let sy = 0;
                 let pid = null;
-                const skip = '.fsnav, .controls, .ptz, .cp, .cp-btn, .quality, .car-pause';
+                const skip = '.fsnav, .controls, .ptz, .cp, .cp-btn, .quality, .car-pause, .pic-items';
                 add(this._fsEl, 'pointerdown', ev => {
                     if (ev.pointerType !== 'touch' || !ev.isPrimary) return;
                     if (ev.target.closest && ev.target.closest(skip)) return;
@@ -4063,22 +4510,28 @@
         'help.still_size': 'Effects use a still frame. Smaller is lighter on weak devices.',
         'label.layout': 'Layout',
         'label.strip': 'Thumbnails (strip)',
+        'help.strip': 'Where the row of small pictures of the other cameras sits next to the main picture',
         'label.grid_columns': 'Grid columns',
+        'help.grid_columns': 'How many cameras sit side by side in the grid',
         'label.gap': 'Gap between cameras (px)',
         'label.switch_effect': 'Effect when switching camera',
         'label.camera_nav': 'Arrows and dots for switching camera',
         'label.carousel': 'Carousel (switches camera automatically)',
         'label.carousel_interval': 'Time between switches',
+        'help.carousel_interval': 'How many seconds each camera is shown before the carousel switches',
         'label.carousel_bar': 'Show progress line to the next switch',
+        'help.carousel_bar': 'A thin line showing how long until the next switch',
         'label.carousel_pause': 'Pause button for the carousel',
         'label.fullscreen_carousel': 'Carousel continues in fullscreen',
         'label.fullscreen_nav': 'Switch camera in fullscreen',
         'label.fullscreen_nav_modes': 'How to switch in fullscreen',
         'label.nav_position': 'Position of camera switching',
+        'help.nav_position': 'Where the buttons for switching camera sit on the card',
         'label.corner_radius': 'Corner radius (px)',
         'label.readout': 'Technical readout',
         'label.auto_quality': 'HD only on the large camera',
         'label.animations': 'Smooth switching between cameras',
+        'help.animations': 'Soft transition when you switch camera. Turn off if the transition feels slow',
         'label.intro': 'Startup animation',
         'label.accent_color': 'Accent colour',
         'label.accent_color_custom': 'Custom colour',
@@ -4096,15 +4549,135 @@
         'label.cam_label_pos_fs': 'Label position: fullscreen',
         'label.label': 'CAM label (empty = automatic, e.g. CAM 01)',
         'label.intro_speed': 'Speed',
+        'help.intro_speed': 'Speed of the opening animation',
         'label.title_position': 'Title position',
         'label.title_offset': 'Title distance from the edge (px)',
-        'label.aspect_ratio': 'Aspect ratio (e.g. 16/9)',
+        'group.layout.lay': 'Layout and spacing',
+        'group.layout.switch': 'Switching camera',
+        'group.layout.car': 'Carousel',
+        'group.layout.fs': 'Fullscreen',
+        'group.look.pic': 'Picture and color',
+        'group.look.title': 'Title and readout',
+        'group.look.label': 'Camera label',
+        'label.aspect_ratio': 'Aspect ratio',
+        'help.aspect_ratio': 'Shape of the picture box on the card. The camera picture itself is not changed. Choose Custom for another ratio, e.g. 16/10.',
+        'o.aspect_ratio.custom': 'Custom…',
+        'label.aspect_ratio_custom': 'Custom aspect ratio (e.g. 16/10)',
+        'help.aspect_ratio_custom': 'Your own aspect ratio as two numbers with a slash, e.g. 16/10 or 4/3',
+        'label.video_fit': 'Picture fit on the card',
+        'help.video_fit': 'How the picture fills its box. Fit: the whole picture is shown, with black bars if the shapes differ (default). Stretch: fills the box but distorts the picture. Crop: fills the box without distortion but cuts off the edges. Thumbnails always crop.',
+        'label.video_fit_fs': 'Picture fit in fullscreen',
+        'help.video_fit_fs': 'The same choices, for fullscreen only. Stretch and Crop fill the whole screen.',
+        'o.video_fit.contain': 'Fit (whole picture)',
+        'o.video_fit.fill': 'Stretch (fills, distorts)',
+        'o.video_fit.cover': 'Crop (fills, cuts the edges)',
+        'label.cam_video_fit': 'Picture fit on the card (this camera)',
+        'help.cam_video_fit': 'Overrides the card setting for this camera only.',
+        'label.video_fit_fs_touch': 'Picture fit in fullscreen on phone and tablet',
+        'help.video_fit_fs_touch': 'Used instead of the fullscreen choice on touch screens only, for example to always fill the screen on a phone. A camera\'s own fullscreen choice still wins.',
+        'o.video_fit_fs_touch.follow': 'Same as fullscreen',
+        'label.cam_video_fit_fs_touch': 'Picture fit in fullscreen on phone and tablet (this camera)',
+        'help.cam_video_fit_fs_touch': 'Overrides everything else for this camera on touch screens only.',
+        'label.cam_video_fit_fs': 'Picture fit in fullscreen (this camera)',
+        'help.cam_video_fit_fs': 'Overrides the fullscreen setting for this camera only.',
+        'o.cam_video_fit.follow': 'Follow the card',
+        'ed.fit_head': 'Picture fit',
+        'label.panel_open': 'Where the panel opens',
+        'help.panel_open': 'Automatic opens under the panel button on wide cards and as a sheet at the bottom on narrow cards.',
+        'o.panel_open.auto': 'Automatic',
+        'o.panel_open.under_button': 'Under the button',
+        'o.panel_open.bottom': 'At the bottom',
+        'label.panel_layout': 'Panel layout',
+        'help.panel_layout': 'List shows one row per element. Grid shows switches and buttons as small tiles.',
+        'o.panel_layout.list': 'List',
+        'o.panel_layout.grid': 'Grid',
+        'label.panel_bg': 'Panel background',
+        'o.panel_bg.glass': 'Glass',
+        'o.panel_bg.solid': 'Solid',
+        'o.panel_bg.clear': 'Clear',
+        'label.panel_opacity': 'Panel opacity',
+        'help.panel_opacity': 'How see-through the glass is. Clear is always at most 35 %, solid ignores it.',
+        'label.panel_radius': 'Panel corner radius (px)',
+        'label.panel_width': 'Panel width (px)',
+        'help.panel_width': 'Only when the panel opens under the button. At the bottom it fills the width.',
+        'label.panel_color_on': 'Colour when on (panel and picture)',
+        'label.panel_color_on_custom': 'Own colour when on',
+        'help.panel_color_on': "Switches, selected buttons and elements on the picture. An element's own colour wins.",
+        'o.panel_color_on.accent': 'Card accent colour',
+        'o.panel_color_on.custom': 'Own colour',
+        'label.privacy_hides_others': 'Privacy hides the other elements',
+        'help.privacy_hides_others': 'While privacy is on, only the privacy switch is shown, in the panel and on the picture. Turn off to keep everything visible.',
+        'ed.panel_head': 'Panel elements',
+        'ed.panel_note': 'Standard shows the fixed panel as before. Standard + mine adds your own elements to it. Only mine lets you build the whole panel yourself. Your own elements are used only in the last two.',
+        'ed.add_item': '+ Add element',
+        'ed.add_privacy': '+ Add privacy',
+        'ed.insert_defaults': 'Insert standard elements',
+        'ed.copy_items': 'Copy elements to the selected cameras',
+        'ed.x_copy': 'Copy panel',
+        'ed.x_paste': 'Paste panel',
+        'ed.x_use': 'Use',
+        'ed.x_cancel': 'Cancel',
+        'ed.x_copied': 'The panel is copied. Use "Paste panel" on another camera or card.',
+        'ed.x_pasted': 'The panel is pasted.',
+        'ed.x_paste_here': 'Nothing copied here. Paste the copied text here and press Use.',
+        'ed.x_bad': 'The text could not be read as a panel.',
+        'ed.x_nothing': 'Nothing to copy: this camera uses the standard panel. Press "Insert standard elements" first.',
+        'ed.remove_item': 'Remove element',
+        'ed.item_n': 'Element {0}',
+        'label.panel_mode': 'Panel',
+        'help.panel_mode': 'Standard + mine adds your own elements to the standard panel. Only mine replaces it; privacy keeps covering the picture as long as the privacy entity is chosen above.',
+        'o.panel_mode.default': 'Standard panel',
+        'o.panel_mode.extra': 'Standard + mine',
+        'o.panel_mode.custom': 'Only mine',
+        'label.el_entity': 'Entity',
+        'help.el_entity': 'Any entity. The card chooses how to show it from its type, and you can change that below.',
+        'label.el_name': 'Name',
+        'help.el_name': "Empty uses the entity's own name.",
+        'label.el_icon': 'Icon',
+        'help.el_icon': "Empty uses the entity's own icon or one that fits its type.",
+        'label.el_display': 'Shown as',
+        'help.el_display': 'Automatic picks the best fit. A light with brightness gets a slider.',
+        'o.el_display.auto': 'Automatic',
+        'o.el_display.toggle': 'Switch',
+        'o.el_display.slider': 'Slider',
+        'o.el_display.value': 'Reading only',
+        'o.el_display.chips': 'Buttons',
+        'o.el_display.dropdown': 'Dropdown',
+        'label.el_color': 'Colour',
+        'label.el_color_custom': 'Own colour',
+        'label.el_color_on': 'Colour when on',
+        'label.el_color_on_custom': 'Own colour when on',
+        'help.el_color': 'Colour of the icon at rest. Default follows the card.',
+        'help.el_color_on': 'Colour of the icon and switch when on.',
+        'o.el_color.default': 'Card colour',
+        'o.el_color.custom': 'Own colour',
+        'label.el_in_panel': 'Show in the panel',
+        'label.el_on_picture': 'Show on the picture',
+        'help.el_on_picture': 'Left or right column on the large camera and in fullscreen.',
+        'o.el_on_picture.none': 'Not on the picture',
+        'o.el_on_picture.left': 'Left column',
+        'o.el_on_picture.right': 'Right column',
+        'label.el_pic_show': 'What shows on the picture',
+        'help.el_pic_show': 'Standard: only the icon on switches and buttons, icon and value on read-outs. Name and value can be added or the icon left out.',
+        'o.el_pic_show.auto': 'Standard',
+        'o.el_pic_show.icon': 'Icon only',
+        'o.el_pic_show.value': 'Status only',
+        'o.el_pic_show.icon_value': 'Icon and status',
+        'o.el_pic_show.name_icon_value': 'Name, icon and status',
+        'o.el_pic_show.name': 'Name only',
+        'label.el_hide_ptz': 'Hide the PTZ arrows when on',
+        'help.el_hide_ptz': 'Hides the arrows that turn the camera while this element is on, for example while it patrols.',
+        'label.el_copy_to': 'Copy to other cameras',
+        'help.el_copy_to': "Replaces the chosen cameras' panel setting and elements with this camera's. The same entities are copied, so change them afterwards.",
         'label.muted': 'Muted by default',
+        'help.muted': 'Start the stream without sound; you can turn it on with the volume button',
         'label.ui': 'Buttons on the picture',
         'help.ui': 'Own buttons: fullscreen, screenshot, picture-in-picture, play and sound. The same on every device. Browser: the browser\'s own player controls, only on the large camera (small tiles never get them). None: a clean picture, and the browser\'s picture-in-picture button is hidden too.',
         'label.pip': 'Picture-in-picture button',
         'label.digital_zoom': 'Digital zoom and panning',
+        'help.digital_zoom': 'Pinch or scroll to zoom into the picture and drag to pan',
         'label.double_tap_zoom': 'Double tap and double click zoom',
+        'help.double_tap_zoom': 'Double tap (touch) or double click (computer) zooms in and out',
         'label.pause_offscreen': 'Pause stream when out of view',
         'label.fullscreen_pause_others': 'Pause hidden cameras in fullscreen',
         'label.background': 'Never stop streams',
@@ -4113,6 +4686,33 @@
         'label.server': 'go2rtc address (optional)',
         'label.poster': 'Poster (go2rtc stream or image URL)',
         'label.enabled': 'Enable PTZ',
+        'label.ptz_style': 'Look of the arrows',
+        'help.ptz_style': 'Ring is the round plate, cross shows only the arrows, four buttons gives each arrow its own round button.',
+        'o.ptz_style.ring': 'Ring',
+        'o.ptz_style.cross': 'Cross',
+        'o.ptz_style.buttons': 'Four buttons',
+        'label.ptz_size': 'Size',
+        'o.ptz_size.small': 'Small',
+        'o.ptz_size.medium': 'Medium',
+        'o.ptz_size.large': 'Large',
+        'label.ptz_pos': 'Placement',
+        'help.ptz_pos': 'Top starts below the name row, bottom sits above the button row.',
+        'o.ptz_pos.top-left': 'Top left',
+        'o.ptz_pos.top': 'Top',
+        'o.ptz_pos.top-right': 'Top right',
+        'o.ptz_pos.left': 'Middle left',
+        'o.ptz_pos.center': 'Centre',
+        'o.ptz_pos.right': 'Middle right',
+        'o.ptz_pos.bottom-left': 'Bottom left',
+        'o.ptz_pos.bottom': 'Bottom',
+        'o.ptz_pos.bottom-right': 'Bottom right',
+        'label.ptz_color': 'Arrow colour',
+        'o.ptz_color.white': 'White',
+        'o.ptz_color.accent': 'Theme colour',
+        'o.ptz_color.custom': 'Own colour',
+        'label.ptz_color_custom': 'Own arrow colour',
+        'label.ptz_opacity': 'Visibility when idle',
+        'help.ptz_opacity': 'How visible the arrows are until you point at them.',
         'label.privacy': 'Privacy switch (switch)',
         'label.preset': 'Preset selector (select)',
         'label.patrol': 'Patrol switch (switch)',
@@ -4144,7 +4744,7 @@
         'help.layout': 'Automatic gives focus + strip with several cameras and single with one camera',
         'help.auto_quality': 'Thumbnails and the grid use the last stream (SD). The large camera and fullscreen use the first (HD).',
         'help.intro': 'Plays when the card loads. The picture is shown only once the stream is running.',
-        'help.carousel_pause': 'A small button under the quality button that holds the carousel until you press it again',
+        'help.carousel_pause': 'A small button next to the panel button that holds the carousel until you press it again',
         'help.carousel': 'Switches the camera shown. Pauses when you use the card, when privacy is on (the camera is skipped), and when the tab is hidden or the card is out of view.',
         'help.switch_effect': 'The old picture is held frozen and replaced by the new one. Slide means in Single that the picture is pushed, and in Focus + strip that the tiles glide. The speed follows the startup speed. Switching between HD and SD always uses the soft transition. The colour effects follow the accent colour from Look. Random picks a new effect at every switch. Default is Soft in Single and Slide in Focus.',
         'help.fullscreen_nav': 'Applies to all layouts. When off, fullscreen shows only the camera you opened.',
@@ -4314,6 +4914,9 @@
         'tile.cp.patrol_mode': 'Patrol direction',
         'tile.cp.light': 'Floodlight',
         'tile.cp.none': 'No controls found',
+        'tile.cp.press': 'Press',
+        'tile.cp.on': 'On',
+        'tile.cp.off': 'Off',
         'tile.error': 'Error',
         // invalid_config
         'invalid_config': 'Invalid configuration',
@@ -4358,22 +4961,28 @@
         'help.still_size': 'Effekterne bruger et stillbillede. Mindre er lettere for svage enheder.',
         'label.layout': 'Layout',
         'label.strip': 'Miniaturer (strip)',
+        'help.strip': 'Hvor rækken af små billeder af de andre kameraer står ved siden af hovedbilledet',
         'label.grid_columns': 'Kolonner i gitter',
+        'help.grid_columns': 'Hvor mange kameraer der står ved siden af hinanden i gitteret',
         'label.gap': 'Mellemrum mellem kameraer (px)',
         'label.switch_effect': 'Effekt ved kameraskift',
         'label.camera_nav': 'Pile og prikker til kameraskift',
         'label.carousel': 'Karrusel (skifter kamera automatisk)',
         'label.carousel_interval': 'Tid mellem skift',
+        'help.carousel_interval': 'Hvor mange sekunder hvert kamera vises, før karrusellen skifter',
         'label.carousel_bar': 'Vis statuslinje til næste skift',
+        'help.carousel_bar': 'En tynd linje, der viser, hvor lang tid der er til næste skift',
         'label.carousel_pause': 'Pauseknap til karrusel',
         'label.fullscreen_carousel': 'Karrusel fortsætter i fuldskærm',
         'label.fullscreen_nav': 'Skift kamera i fuldskærm',
         'label.fullscreen_nav_modes': 'Sådan skifter man i fuldskærm',
         'label.nav_position': 'Placering af kameraskift',
+        'help.nav_position': 'Hvor knapperne til at skifte kamera sidder på kortet',
         'label.corner_radius': 'Hjørneradius (px)',
         'label.readout': 'Teknisk udlæsning',
         'label.auto_quality': 'HD kun på det store kamera',
         'label.animations': 'Glidende skift mellem kameraer',
+        'help.animations': 'Blød overgang, når du skifter kamera. Slå fra, hvis overgangen føles langsom',
         'label.intro': 'Opstart-animation',
         'label.accent_color': 'Accentfarve',
         'label.accent_color_custom': 'Egen farve',
@@ -4391,15 +5000,135 @@
         'label.cam_label_pos_fs': 'Mærkets placering: fuldskærm',
         'label.label': 'CAM-mærke (tom = automatisk, fx CAM 01)',
         'label.intro_speed': 'Hastighed',
+        'help.intro_speed': 'Hastigheden på åbningsanimationen',
         'label.title_position': 'Titlens placering',
         'label.title_offset': 'Titlens afstand fra kanten (px)',
-        'label.aspect_ratio': 'Billedformat (fx 16/9)',
+        'group.layout.lay': 'Layout og mellemrum',
+        'group.layout.switch': 'Kameraskift',
+        'group.layout.car': 'Karrusel',
+        'group.layout.fs': 'Fuldskærm',
+        'group.look.pic': 'Billede og farve',
+        'group.look.title': 'Titel og udlæsning',
+        'group.look.label': 'Kameramærke',
+        'label.aspect_ratio': 'Billedformat',
+        'help.aspect_ratio': 'Formen på billedfeltet på kortet. Kameraets eget billede ændres ikke. Vælg Egen til et andet format, fx 16/10.',
+        'o.aspect_ratio.custom': 'Egen…',
+        'label.aspect_ratio_custom': 'Eget billedformat (fx 16/10)',
+        'help.aspect_ratio_custom': 'Dit eget billedformat som to tal med skråstreg, fx 16/10 eller 4/3',
+        'label.video_fit': 'Billedfyldning på kortet',
+        'help.video_fit': 'Hvordan billedet fylder sit felt. Tilpas: hele billedet vises, med sorte bjælker hvis formen er en anden (standard). Stræk: fylder feltet, men forvrænger billedet. Beskær: fylder feltet uden forvrængning, men klipper kanterne. Miniaturer beskæres altid.',
+        'label.video_fit_fs': 'Billedfyldning i fuldskærm',
+        'help.video_fit_fs': 'De samme valg, kun for fuldskærm. Stræk og Beskær fylder hele skærmen.',
+        'o.video_fit.contain': 'Tilpas (hele billedet)',
+        'o.video_fit.fill': 'Stræk (fylder, forvrænger)',
+        'o.video_fit.cover': 'Beskær (fylder, klipper kanterne)',
+        'label.cam_video_fit': 'Billedfyldning på kortet (dette kamera)',
+        'help.cam_video_fit': 'Overstyrer kortets valg kun for dette kamera.',
+        'label.video_fit_fs_touch': 'Billedfyldning i fuldskærm på mobil og tablet',
+        'help.video_fit_fs_touch': 'Bruges i stedet for fuldskærmsvalget, kun på berøringsskærme, fx for altid at fylde skærmen på en telefon. Et kameras eget fuldskærmsvalg vinder stadig.',
+        'o.video_fit_fs_touch.follow': 'Som fuldskærm',
+        'label.cam_video_fit_fs_touch': 'Billedfyldning i fuldskærm på mobil og tablet (dette kamera)',
+        'help.cam_video_fit_fs_touch': 'Overstyrer alt andet for dette kamera, kun på berøringsskærme.',
+        'label.cam_video_fit_fs': 'Billedfyldning i fuldskærm (dette kamera)',
+        'help.cam_video_fit_fs': 'Overstyrer fuldskærmsvalget kun for dette kamera.',
+        'o.cam_video_fit.follow': 'Følg kortet',
+        'ed.fit_head': 'Billedfyldning',
+        'label.panel_open': 'Hvor panelet åbner',
+        'help.panel_open': 'Automatisk åbner under panelknappen på brede kort og som et ark nederst på smalle kort.',
+        'o.panel_open.auto': 'Automatisk',
+        'o.panel_open.under_button': 'Under knappen',
+        'o.panel_open.bottom': 'Nederst',
+        'label.panel_layout': 'Panelets opbygning',
+        'help.panel_layout': 'Liste viser én række pr. element. Gitter viser kontakter og knapper som små felter.',
+        'o.panel_layout.list': 'Liste',
+        'o.panel_layout.grid': 'Gitter',
+        'label.panel_bg': 'Panelets baggrund',
+        'o.panel_bg.glass': 'Glas',
+        'o.panel_bg.solid': 'Massiv',
+        'o.panel_bg.clear': 'Gennemsigtig',
+        'label.panel_opacity': 'Panelets gennemsigtighed',
+        'help.panel_opacity': 'Hvor gennemsigtigt glasset er. Gennemsigtig er altid højst 35 %, massiv ignorerer den.',
+        'label.panel_radius': 'Panelets hjørneradius (px)',
+        'label.panel_width': 'Panelets bredde (px)',
+        'help.panel_width': 'Kun når panelet åbner under knappen. Nederst fylder det hele bredden.',
+        'label.panel_color_on': 'Farve når tændt (panel og billede)',
+        'label.panel_color_on_custom': 'Egen farve når tændt',
+        'help.panel_color_on': 'Kontakter, valgte knapper og elementer på billedet. Et elements egen farve vinder.',
+        'o.panel_color_on.accent': 'Kortets accentfarve',
+        'o.panel_color_on.custom': 'Egen farve',
+        'label.privacy_hides_others': 'Privatliv skjuler de andre elementer',
+        'help.privacy_hides_others': 'Mens privatliv er slået til, vises kun privatlivskontakten, i panelet og på billedet. Slå fra for at beholde alt synligt.',
+        'ed.panel_head': 'Panelets elementer',
+        'ed.panel_note': 'Standard viser det faste panel som før. Standard + mine lægger dine egne elementer til. Kun mine lader dig bygge hele panelet selv. Dine egne elementer bruges kun i de to sidste.',
+        'ed.add_item': '+ Tilføj element',
+        'ed.add_privacy': '+ Tilføj privatliv',
+        'ed.insert_defaults': 'Indsæt standardelementer',
+        'ed.copy_items': 'Kopiér elementer til de valgte kameraer',
+        'ed.x_copy': 'Kopiér panel',
+        'ed.x_paste': 'Indsæt panel',
+        'ed.x_use': 'Brug',
+        'ed.x_cancel': 'Annullér',
+        'ed.x_copied': 'Panelet er kopieret. Brug "Indsæt panel" på et andet kamera eller kort.',
+        'ed.x_pasted': 'Panelet er indsat.',
+        'ed.x_paste_here': 'Intet kopieret her. Indsæt den kopierede tekst her og tryk Brug.',
+        'ed.x_bad': 'Teksten kunne ikke læses som et panel.',
+        'ed.x_nothing': 'Intet at kopiere: kameraet bruger standardpanelet. Tryk først "Indsæt standardelementer".',
+        'ed.remove_item': 'Fjern element',
+        'ed.item_n': 'Element {0}',
+        'label.panel_mode': 'Panel',
+        'help.panel_mode': 'Standard + mine lægger dine egne elementer til standardpanelet. Kun mine erstatter det; privatliv dækker stadig billedet, så længe privatlivsentiteten er valgt ovenfor.',
+        'o.panel_mode.default': 'Standardpanel',
+        'o.panel_mode.extra': 'Standard + mine',
+        'o.panel_mode.custom': 'Kun mine',
+        'label.el_entity': 'Entitet',
+        'help.el_entity': 'Enhver entitet. Kortet vælger visningen ud fra typen, og du kan ændre den nedenfor.',
+        'label.el_name': 'Navn',
+        'help.el_name': 'Tomt bruger entitetens eget navn.',
+        'label.el_icon': 'Ikon',
+        'help.el_icon': 'Tomt bruger entitetens eget ikon eller et, der passer til typen.',
+        'label.el_display': 'Vises som',
+        'help.el_display': 'Automatisk vælger det, der passer bedst. Et lys med lysstyrke får en skyder.',
+        'o.el_display.auto': 'Automatisk',
+        'o.el_display.toggle': 'Kontakt',
+        'o.el_display.slider': 'Skyder',
+        'o.el_display.value': 'Kun aflæsning',
+        'o.el_display.chips': 'Valgknapper',
+        'o.el_display.dropdown': 'Rullemenu',
+        'label.el_color': 'Farve',
+        'label.el_color_custom': 'Egen farve',
+        'label.el_color_on': 'Farve når tændt',
+        'label.el_color_on_custom': 'Egen farve når tændt',
+        'help.el_color': 'Ikonets farve i hvile. Standard følger kortet.',
+        'help.el_color_on': 'Farven på ikon og kontakt, når den er tændt.',
+        'o.el_color.default': 'Kortets farve',
+        'o.el_color.custom': 'Egen farve',
+        'label.el_in_panel': 'Vis i panelet',
+        'label.el_on_picture': 'Vis på billedet',
+        'help.el_on_picture': 'Venstre eller højre søjle på det store kamera og i fuldskærm.',
+        'o.el_on_picture.none': 'Ikke på billedet',
+        'o.el_on_picture.left': 'Venstre søjle',
+        'o.el_on_picture.right': 'Højre søjle',
+        'label.el_pic_show': 'Hvad der vises på billedet',
+        'help.el_pic_show': 'Standard: kun ikon på kontakter og knapper, ikon og værdi på aflæsninger. Navn og status kan lægges til, eller ikonet kan udelades.',
+        'o.el_pic_show.auto': 'Standard',
+        'o.el_pic_show.icon': 'Kun ikon',
+        'o.el_pic_show.value': 'Kun status',
+        'o.el_pic_show.icon_value': 'Ikon og status',
+        'o.el_pic_show.name_icon_value': 'Navn, ikon og status',
+        'o.el_pic_show.name': 'Kun navn',
+        'label.el_hide_ptz': 'Skjul PTZ-pilene, når den er tændt',
+        'help.el_hide_ptz': 'Skjuler pilene, der drejer kameraet, mens elementet er tændt, fx mens det patruljerer.',
+        'label.el_copy_to': 'Kopiér til andre kameraer',
+        'help.el_copy_to': 'Erstatter de valgte kameraers panelindstilling og elementer med dette kameras. De samme entiteter kopieres, så ret dem bagefter.',
         'label.muted': 'Lyd slået fra som standard',
+        'help.muted': 'Start streamen uden lyd; du kan slå lyden til med lydknappen',
         'label.ui': 'Knapper på billedet',
         'help.ui': 'Egne knapper: fuldskærm, screenshot, billede-i-billede, play og lyd. Ens på alle enheder. Browser: browserens egne afspillerkontroller, kun på det store kamera (små fliser får dem aldrig). Ingen: rent billede, og browserens billede-i-billede-knap skjules også.',
         'label.pip': 'Billede-i-billede-knap',
         'label.digital_zoom': 'Digital zoom og panorering',
+        'help.digital_zoom': 'Knib eller scroll for at zoome ind i billedet, og træk for at flytte rundt',
         'label.double_tap_zoom': 'Dobbelttryk og dobbeltklik zoomer',
+        'help.double_tap_zoom': 'Dobbelttryk (touch) eller dobbeltklik (computer) zoomer ind og ud',
         'label.pause_offscreen': 'Pause stream uden for syne',
         'label.fullscreen_pause_others': 'Pause skjulte kameraer i fuldskærm',
         'label.background': 'Stop aldrig streams',
@@ -4408,6 +5137,33 @@
         'label.server': 'go2rtc-adresse (valgfri)',
         'label.poster': 'Poster (go2rtc-stream eller billed-URL)',
         'label.enabled': 'Aktivér PTZ',
+        'label.ptz_style': 'Pilenes udseende',
+        'help.ptz_style': 'Ring er den runde plade, kryds viser kun pilene, og fire knapper giver hver pil sin egen runde knap.',
+        'o.ptz_style.ring': 'Ring',
+        'o.ptz_style.cross': 'Kryds',
+        'o.ptz_style.buttons': 'Fire knapper',
+        'label.ptz_size': 'Størrelse',
+        'o.ptz_size.small': 'Lille',
+        'o.ptz_size.medium': 'Mellem',
+        'o.ptz_size.large': 'Stor',
+        'label.ptz_pos': 'Placering',
+        'help.ptz_pos': 'Øverst starter under navnerækken, nederst ligger over knaplinjen.',
+        'o.ptz_pos.top-left': 'Øverst til venstre',
+        'o.ptz_pos.top': 'Øverst',
+        'o.ptz_pos.top-right': 'Øverst til højre',
+        'o.ptz_pos.left': 'Midt til venstre',
+        'o.ptz_pos.center': 'Midt i billedet',
+        'o.ptz_pos.right': 'Midt til højre',
+        'o.ptz_pos.bottom-left': 'Nederst til venstre',
+        'o.ptz_pos.bottom': 'Nederst',
+        'o.ptz_pos.bottom-right': 'Nederst til højre',
+        'label.ptz_color': 'Pilenes farve',
+        'o.ptz_color.white': 'Hvid',
+        'o.ptz_color.accent': 'Temaets farve',
+        'o.ptz_color.custom': 'Egen farve',
+        'label.ptz_color_custom': 'Egen farve til pilene',
+        'label.ptz_opacity': 'Synlighed i hvile',
+        'help.ptz_opacity': 'Hvor tydelige pilene er, indtil du peger på dem.',
         'label.privacy': 'Privatliv-afbryder (switch)',
         'label.preset': 'Preset-vælger (select)',
         'label.patrol': 'Patrulje-afbryder (switch)',
@@ -4439,7 +5195,7 @@
         'help.layout': 'Automatisk giver fokus + strip ved flere kameraer og enkelt ved ét kamera',
         'help.auto_quality': 'Miniaturer og gitter bruger den sidste stream (SD). Det store kamera og fuldskærm bruger den første (HD).',
         'help.intro': 'Afspilles, når kortet indlæses. Billedet vises først, når streamen kører.',
-        'help.carousel_pause': 'En lille knap under kvalitetsknappen, der holder karrusellen, til du trykker igen',
+        'help.carousel_pause': 'En lille knap ved siden af panelknappen, der holder karrusellen, til du trykker igen',
         'help.carousel': 'Skifter det viste kamera. Pauser, når du bruger kortet, når privatliv er slået til (kameraet springes over), og når fanen er skjult eller kortet uden for syne.',
         'help.switch_effect': 'Det gamle billede holdes frosset og afløses af det nye. Glid betyder i Enkelt, at billedet skubbes, og i Fokus + strip, at fliserne glider. Hastigheden følger opstartens. Skifte mellem HD og SD bruger altid den bløde overgang. Farve-effekterne følger accentfarven fra Udseende. Tilfældig vælger en ny effekt ved hvert skift. Standard er Blød i Enkelt og Glid i Fokus.',
         'help.fullscreen_nav': 'Gælder alle layouts. Slået fra viser fuldskærm kun det kamera, man åbnede.',
@@ -4609,6 +5365,9 @@
         'tile.cp.patrol_mode': 'Patruljeretning',
         'tile.cp.light': 'Projektørlys',
         'tile.cp.none': 'Ingen styringer fundet',
+        'tile.cp.press': 'Tryk',
+        'tile.cp.on': 'Til',
+        'tile.cp.off': 'Fra',
         'tile.error': 'Fejl',
         // invalid_config
         'invalid_config': 'Ugyldig konfiguration',
@@ -4673,6 +5432,16 @@
         {value: 'mjpeg', label: tr('o.mode.mjpeg')},
     ];
 
+    const FIT_OPTIONS = () => [
+        {value: 'contain', label: tr('o.video_fit.contain')},
+        {value: 'fill', label: tr('o.video_fit.fill')},
+        {value: 'cover', label: tr('o.video_fit.cover')},
+    ];
+    const CAM_FIT_SCHEMA = () => [
+        sel('cam_video_fit', [{value: 'follow', label: tr('o.cam_video_fit.follow')}, ...FIT_OPTIONS()]),
+        sel('cam_video_fit_fs', [{value: 'follow', label: tr('o.cam_video_fit.follow')}, ...FIT_OPTIONS()]),
+        sel('cam_video_fit_fs_touch', [{value: 'follow', label: tr('o.cam_video_fit.follow')}, ...FIT_OPTIONS()]),
+    ];
     const CAM_SCHEMA = [{name: 'name', selector: {text: {}}}, {name: 'label', selector: {text: {}}}];
 
     const STREAM_SCHEMA = () => [{
@@ -4843,7 +5612,7 @@
     ];
 
     // Udseende: accentfarven først (bruges overalt), derefter CAM-mærket og titlen. Egen farve og mærkets valg vises kun, når de giver mening.
-    const lookSchema = (color, label, lcolor, lro) => [
+    const lookSchema = (color, label, lcolor, lro, arCustom) => [
         sel('accent_color', INTRO_COLOR_OPTIONS()),
         ...(color === 'custom' ? [{name: 'accent_color_custom', selector: {color_rgb: {}}}] : []),
         bool('cam_label'),
@@ -4890,7 +5659,14 @@
         ]),
         {name: 'title_offset', selector: {number: {min: 0, max: 100, step: 1, mode: 'slider', unit_of_measurement: 'px'}}},
         {name: 'corner_radius', selector: {number: {min: 0, max: 32, step: 1, mode: 'slider', unit_of_measurement: 'px'}}},
-        {name: 'aspect_ratio', selector: {text: {}}},
+        sel('aspect_ratio', [
+            ...AR_PRESETS.map(v => ({value: v, label: v})),
+            {value: 'custom', label: tr('o.aspect_ratio.custom')},
+        ]),
+        ...(arCustom ? [{name: 'aspect_ratio_custom', selector: {text: {}}}] : []),
+        sel('video_fit', FIT_OPTIONS()),
+        sel('video_fit_fs', FIT_OPTIONS()),
+        sel('video_fit_fs_touch', [{value: 'follow', label: tr('o.video_fit_fs_touch.follow')}, ...FIT_OPTIONS()]),
         {name: 'readout', selector: {select: {multiple: true, mode: 'list', options: [
             {value: 'connection', label: tr('o.readout.connection')},
             {value: 'resolution', label: tr('o.readout.resolution')},
@@ -4900,13 +5676,30 @@
         ]}}},
     ];
 
-    const PANEL_SCHEMA = () => [
+    const PANEL_SCHEMA = (colorOn = 'accent') => [
         bool('control_panel'),
         sel('preset_style', [
             {value: 'auto', label: tr('o.preset_style.auto')},
             {value: 'buttons', label: tr('o.preset_style.buttons')},
             {value: 'dropdown', label: tr('o.preset_style.dropdown')},
         ]),
+        sel('panel_open', [
+            {value: 'auto', label: tr('o.panel_open.auto')},
+            {value: 'under_button', label: tr('o.panel_open.under_button')},
+            {value: 'bottom', label: tr('o.panel_open.bottom')},
+        ]),
+        sel('panel_layout', [{value: 'list', label: tr('o.panel_layout.list')}, {value: 'grid', label: tr('o.panel_layout.grid')}]),
+        sel('panel_bg', [
+            {value: 'glass', label: tr('o.panel_bg.glass')},
+            {value: 'solid', label: tr('o.panel_bg.solid')},
+            {value: 'clear', label: tr('o.panel_bg.clear')},
+        ]),
+        {name: 'panel_opacity', selector: {number: {min: 0.3, max: 1, step: 0.05, mode: 'slider'}}},
+        {name: 'panel_radius', selector: {number: {min: 0, max: 32, step: 1, mode: 'slider', unit_of_measurement: 'px'}}},
+        {name: 'panel_width', selector: {number: {min: 160, max: 360, step: 10, mode: 'slider', unit_of_measurement: 'px'}}},
+        sel('panel_color_on', [{value: 'accent', label: tr('o.panel_color_on.accent')}, {value: 'custom', label: tr('o.panel_color_on.custom')}]),
+        ...(colorOn === 'custom' ? [{name: 'panel_color_on_custom', selector: {color_rgb: {}}}] : []),
+        bool('privacy_hides_others'),
         sel('privacy_cover', [
             {value: 'black', label: tr('o.privacy_cover.black')},
             {value: 'blur', label: tr('o.privacy_cover.blur')},
@@ -4968,13 +5761,59 @@
         {name: 'light', selector: {entity: {domain: 'light'}}},
     ];
     const PTZ_TOGGLE = [bool('enabled')];
+    /* Egne elementer i panelet (editoren): hvilke visninger der kan vælges for entitetens type */
+    const EL_DISPLAYS = dom => dom === 'light' ? ['auto', 'toggle', 'slider', 'value'] : SELECT_DOM.includes(dom) ? ['auto', 'chips', 'dropdown', 'value'] : ['auto', 'value'];
+    const EL_SWATCH = [79, 216, 255];
+    const PANEL_MODE_SCHEMA = () => [sel('panel_mode', [
+        {value: 'default', label: tr('o.panel_mode.default')},
+        {value: 'extra', label: tr('o.panel_mode.extra')},
+        {value: 'custom', label: tr('o.panel_mode.custom')},
+    ])];
+    const ITEM_SCHEMA = raw => {
+        const priv = raw.type === 'privacy';
+        const dom = (typeof raw.entity === 'string' ? raw.entity : '').split('.')[0];
+        const out = [];
+        if (!priv) out.push({name: 'el_entity', selector: {entity: {}}});
+        out.push({name: 'el_name', selector: {text: {}}}, {name: 'el_icon', selector: {icon: {}}});
+        if (!priv && dom) out.push(sel('el_display', EL_DISPLAYS(dom).map(v => ({value: v, label: tr('o.el_display.' + v)}))));
+        out.push(sel('el_color', [{value: 'default', label: tr('o.el_color.default')}, {value: 'custom', label: tr('o.el_color.custom')}]));
+        if (raw.color) out.push({name: 'el_color_custom', selector: {color_rgb: {}}});
+        out.push(sel('el_color_on', [{value: 'default', label: tr('o.el_color.default')}, {value: 'custom', label: tr('o.el_color.custom')}]));
+        if (raw.color_on) out.push({name: 'el_color_on_custom', selector: {color_rgb: {}}});
+        out.push(bool('el_in_panel'), sel('el_on_picture', [
+            {value: 'none', label: tr('o.el_on_picture.none')},
+            {value: 'left', label: tr('o.el_on_picture.left')},
+            {value: 'right', label: tr('o.el_on_picture.right')},
+        ]));
+        if (raw.on_picture === 'left' || raw.on_picture === 'right') out.push(sel('el_pic_show', [
+            {value: 'auto', label: tr('o.el_pic_show.auto')},
+            {value: 'icon', label: tr('o.el_pic_show.icon')},
+            {value: 'value', label: tr('o.el_pic_show.value')},
+            {value: 'icon_value', label: tr('o.el_pic_show.icon_value')},
+            {value: 'name_icon_value', label: tr('o.el_pic_show.name_icon_value')},
+            {value: 'name', label: tr('o.el_pic_show.name')},
+        ]));
+        if (!priv && ONOFF_DOM.includes(dom)) out.push(bool('el_hide_ptz'));
+        return out;
+    };
     const PTZ_FIELDS = DIRS.map(d => ({name: d, selector: {entity: {domain: 'button'}}}));
+    /** Udseende af PTZ-pilene (pr. kamera). custom: egen farve er valgt, så farvevælgeren vises. */
+    const PTZ_LOOK = custom => [
+        sel('ptz_style', PTZ_STYLES.map(v => ({value: v, label: tr('o.ptz_style.' + v)}))),
+        sel('ptz_size', Object.keys(PTZ_SIZES).map(v => ({value: v, label: tr('o.ptz_size.' + v)}))),
+        sel('ptz_pos', PTZ_POSITIONS.map(v => ({value: v, label: tr('o.ptz_pos.' + v)}))),
+        sel('ptz_color', ['white', 'accent', 'custom'].map(v => ({value: v, label: tr('o.ptz_color.' + v)}))),
+        ...(custom ? [{name: 'ptz_color_custom', selector: {color_rgb: {}}}] : []),
+        {name: 'ptz_opacity', selector: {number: {min: 0.1, max: 1, step: 0.05, mode: 'slider'}}},
+    ];
 
     /** Standardværdier. En indstilling skrives kun i YAML, hvis den afviger fra dem. */
     const FIELD_DEF = {
         layout: 'auto', strip: 'auto', grid_columns: undefined, gap: 8, auto_quality: true, animations: true,
         intro: 'focus', intro_speed: 'normal',
-        accent_color: 'primary', accent_color_custom: '', cam_label: false, cam_label_style: 'pill', cam_label_text: 'number', cam_label_pos: 'top-left', cam_label_pos_small: 'top-left', cam_label_pos_fs: 'top-left', cam_label_offset: 14, cam_label_side: 12, cam_label_color: 'auto', cam_label_color_custom: '', cam_label_readout: false, cam_label_readout_color: 'own', corner_radius: 12, readout: ['connection', 'resolution', 'clock'], camera_nav: true, nav_position: 'bottom', switch_effect: 'soft', carousel: false, carousel_interval: 10, carousel_bar: true, carousel_pause: true, fullscreen_carousel: true, fullscreen_nav: true, fullscreen_nav_modes: ['arrows', 'swipe', 'keys'], title_position: 'top-center', title_offset: 14, aspect_ratio: '16/9',
+        panel_open: 'auto', panel_layout: 'list', panel_bg: 'glass', panel_opacity: 0.82, panel_radius: 14, panel_width: 230, panel_color_on: 'accent', panel_color_on_custom: '', privacy_hides_others: true,
+        video_fit_fs_touch: 'follow',
+        accent_color: 'primary', accent_color_custom: '', cam_label: false, cam_label_style: 'pill', cam_label_text: 'number', cam_label_pos: 'top-left', cam_label_pos_small: 'top-left', cam_label_pos_fs: 'top-left', cam_label_offset: 14, cam_label_side: 12, cam_label_color: 'auto', cam_label_color_custom: '', cam_label_readout: false, cam_label_readout_color: 'own', corner_radius: 12, readout: ['connection', 'resolution', 'clock'], camera_nav: true, nav_position: 'bottom', switch_effect: 'soft', carousel: false, carousel_interval: 10, carousel_bar: true, carousel_pause: true, fullscreen_carousel: true, fullscreen_nav: true, fullscreen_nav_modes: ['arrows', 'swipe', 'keys'], title_position: 'top-center', title_offset: 14, aspect_ratio: '16/9', aspect_ratio_custom: '', video_fit: 'contain', video_fit_fs: 'contain',
         control_panel: true, preset_style: 'auto', privacy_cover: 'black', privacy_cover_small: true, privacy_cover_quality: 'normal', ui: 'own', pip: 'auto', digital_zoom: true, double_tap_zoom: true, muted: true,
         pause_offscreen: true, fullscreen_pause_others: false, background: false, show_status: false, mode: 'auto', still_size: 'medium', server: '', poster: '',
     };
@@ -4993,8 +5832,8 @@
     const TAB_FIELDS = {
         layout: ['layout', 'switch_effect', 'camera_nav', 'nav_position', 'carousel', 'carousel_interval', 'carousel_bar', 'carousel_pause', 'fullscreen_carousel', 'fullscreen_nav', 'fullscreen_nav_modes', 'strip', 'grid_columns', 'gap', 'auto_quality', 'animations'],
         intro: ['intro', 'intro_speed'],
-        look: ['accent_color', 'accent_color_custom', 'cam_label', 'cam_label_style', 'cam_label_text', 'cam_label_pos', 'cam_label_pos_small', 'cam_label_pos_fs', 'cam_label_offset', 'cam_label_side', 'cam_label_color', 'cam_label_color_custom', 'cam_label_readout', 'cam_label_readout_color', 'title_position', 'title_offset', 'corner_radius', 'aspect_ratio', 'readout'],
-        panel: ['control_panel', 'preset_style', 'privacy_cover', 'privacy_cover_small', 'privacy_cover_quality'],
+        look: ['accent_color', 'accent_color_custom', 'cam_label', 'cam_label_style', 'cam_label_text', 'cam_label_pos', 'cam_label_pos_small', 'cam_label_pos_fs', 'cam_label_offset', 'cam_label_side', 'cam_label_color', 'cam_label_color_custom', 'cam_label_readout', 'cam_label_readout_color', 'title_position', 'title_offset', 'corner_radius', 'aspect_ratio', 'aspect_ratio_custom', 'video_fit', 'video_fit_fs', 'video_fit_fs_touch', 'readout'],
+        panel: ['control_panel', 'preset_style', 'panel_open', 'panel_layout', 'panel_bg', 'panel_opacity', 'panel_radius', 'panel_width', 'panel_color_on', 'panel_color_on_custom', 'privacy_hides_others', 'privacy_cover', 'privacy_cover_small', 'privacy_cover_quality'],
         controls: ['ui', 'pip', 'digital_zoom', 'double_tap_zoom', 'muted'],
         adv: ['pause_offscreen', 'fullscreen_pause_others', 'background', 'show_status', 'mode', 'still_size', 'server', 'poster'],
     };
@@ -5030,6 +5869,9 @@
         .tab:hover { background: var(--secondary-background-color); }
         .tab.active { color: var(--primary-color); border-bottom-color: var(--primary-color); }
         .subh { font-weight: 500; font-size: 14px; margin: 12px 0 6px; color: var(--secondary-text-color); }
+        ha-expansion-panel.grp { display: block; margin: 0 0 8px; }
+        ha-expansion-panel.grp ha-form { display: block; padding: 4px 12px 12px; }
+        ha-expansion-panel[hidden] { display: none; }
         .note { font-size: 13px; color: var(--secondary-text-color); margin: 4px 0 8px; }
         .row { border: 1px solid var(--divider-color); border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; }
 
@@ -5058,6 +5900,21 @@
         .cam.open .chev { transform: rotate(180deg); }
         .cam-body { padding: 4px 12px 12px; border-top: 1px solid var(--divider-color); }
         .cam-body .row { border-style: dashed; }
+        .row.item { padding: 0; overflow: hidden; }
+        .item-head { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: none; border: 0; color: var(--primary-text-color); font: inherit; text-align: left; cursor: pointer; }
+        .item-head:hover { background: var(--secondary-background-color); }
+        .item-head .ii { color: var(--secondary-text-color); }
+        .row.item.open { border-style: solid; border-color: var(--primary-color); }
+        .row.item.open .item-head .ii { color: var(--primary-color); }
+        .item-head .in { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .cam.open .item .chev { transform: none; }
+        .cam.open .item.open .chev { transform: rotate(180deg); }
+        .item-body { padding: 4px 12px 12px; border-top: 1px solid var(--divider-color); }
+        .pact { margin-top: 4px; }
+        .copybox { margin-top: 10px; }
+        .xbox { margin-top: 12px; }
+        .xtext { box-sizing: border-box; width: 100%; margin-top: 6px; padding: 6px 8px; font: 12px/1.4 monospace; color: var(--primary-text-color); background: var(--secondary-background-color, rgba(127, 127, 127, 0.12)); border: 1px solid var(--divider-color, #888); border-radius: 6px; resize: vertical; }
+        .copybox .btn { margin-top: 4px; }
         .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
         .btn {
             cursor: pointer;
@@ -5075,6 +5932,25 @@
         .btn.rm { color: var(--error-color); border-color: var(--error-color); margin-left: auto; }
     `;
 
+    /**
+     * Grupper (sammenfoldelige afsnit) i de to lange faner. Hver gruppe er sit eget afsnit med sin egen formular.
+     * Felterne står stadig i TAB_FIELDS; en gruppe viser de af sine felter, der er i fanens skema lige nu.
+     * Det første afsnit i hver fane er åbent fra start.
+     */
+    const GROUPS = {
+        layout: [
+            {id: 'lay', fields: ['layout', 'strip', 'grid_columns', 'gap', 'auto_quality', 'animations']},
+            {id: 'switch', fields: ['switch_effect', 'camera_nav', 'nav_position']},
+            {id: 'car', fields: ['carousel', 'carousel_interval', 'carousel_bar', 'carousel_pause']},
+            {id: 'fs', fields: ['fullscreen_nav', 'fullscreen_nav_modes', 'fullscreen_carousel']},
+        ],
+        look: [
+            {id: 'pic', fields: ['accent_color', 'accent_color_custom', 'corner_radius', 'aspect_ratio', 'aspect_ratio_custom', 'video_fit', 'video_fit_fs', 'video_fit_fs_touch']},
+            {id: 'title', fields: ['title_position', 'title_offset', 'readout']},
+            {id: 'label', fields: ['cam_label', 'cam_label_style', 'cam_label_text', 'cam_label_pos', 'cam_label_pos_small', 'cam_label_pos_fs', 'cam_label_offset', 'cam_label_side', 'cam_label_color', 'cam_label_color_custom', 'cam_label_readout', 'cam_label_readout_color']},
+        ],
+    };
+
     class PanoptesCardEditor extends HTMLElement {
         constructor() {
             super();
@@ -5086,6 +5962,7 @@
             this._layoutKey = '';
             this._introKey = '';
             this._lookKey = '';
+            this._openGroups = new Set(Object.keys(GROUPS).map(t => `${t}.${GROUPS[t][0].id}`));   // åbne afsnit (huskes, også når editoren bygges igen)
         }
 
         set hass(hass) {
@@ -5190,9 +6067,16 @@
             const c = this._config;
             Object.keys(v).forEach(key => {
                 if (!(key in FIELD_DEF)) return;
+                if (key === 'aspect_ratio_custom') return;        // behandles efter løkken
                 let val = v[key];
+                if (key === 'aspect_ratio') {
+                    // «Egen» skrives aldrig i YAML; det er kun et valg i editoren
+                    if (val === 'custom') { this._arCustom = true; return; }
+                    this._arCustom = false;
+                    this._arText = undefined;
+                }
                 if (typeof val === 'string') val = val.trim();
-                if ((key === 'accent_color_custom' || key === 'cam_label_color_custom') && Array.isArray(val)) val = toHex(val);
+                if ((key === 'accent_color_custom' || key === 'cam_label_color_custom' || key === 'panel_color_on_custom') && Array.isArray(val)) val = toHex(val);
                 if (key === 'grid_columns') val = val === 'auto' || !val ? undefined : parseInt(val, 10);
                 if (key === 'carousel_interval') val = parseInt(val, 10) || 10;
                 if (key === 'switch_effect') FIELD_DEF.switch_effect = fxDefault(v.layout || c.layout);
@@ -5200,11 +6084,26 @@
                 if (val === undefined || val === '' || same) delete c[key];
                 else c[key] = val;
             });
+            if (v.aspect_ratio === 'custom' && 'aspect_ratio_custom' in v) {
+                // Eget billedformat: kun et gyldigt format (fx 16/10) skrives
+                this._arText = String(v.aspect_ratio_custom);
+                const t = arNorm(v.aspect_ratio_custom);
+                if (AR_RE.test(t)) {
+                    if (t === FIELD_DEF.aspect_ratio) delete c.aspect_ratio;
+                    else c.aspect_ratio = t;
+                }
+            }
             if (c.accent_color !== 'custom') delete c.accent_color_custom;
             if (c.cam_label_color !== 'custom') delete c.cam_label_color_custom;
+            if (c.panel_color_on !== 'custom') delete c.panel_color_on_custom;
             // Ældre navne for de samme indstillinger
             if (c.digital_zoom !== false && c.digital_ptz === false && v.digital_zoom) delete c.digital_ptz;
             if (c.pause_offscreen !== false && c.intersection === 0 && v.pause_offscreen) delete c.intersection;
+        }
+
+        /** Vises billedformatet som «Egen»? (valgt i editoren, eller et format der ikke står i menuen) */
+        _arIsCustom() {
+            return this._arCustom === true || !AR_PRESETS.includes(arNorm(this._config.aspect_ratio || FIELD_DEF.aspect_ratio));
         }
 
         /** Værdier til en formular ud fra konfigurationen. */
@@ -5220,8 +6119,11 @@
                 else if (k === 'carousel_interval') val = String(c.carousel_interval || 10);
                 else if (k === 'switch_effect') val = c.switch_effect || fxDefault(c.layout);
                 else if (k === 'cam_label_pos' || k === 'cam_label_pos_small' || k === 'cam_label_pos_fs') val = clPos(c, k);
+                else if (k === 'aspect_ratio') val = this._arIsCustom() ? 'custom' : arNorm(c.aspect_ratio || FIELD_DEF.aspect_ratio);
+                else if (k === 'aspect_ratio_custom') val = this._arText !== undefined ? this._arText : (c.aspect_ratio || FIELD_DEF.aspect_ratio);
                 else if (k === 'cam_label_color_custom') val = parseRgb(c.cam_label_color_custom) || [255, 255, 255];
                 else if (k === 'accent_color_custom') val = parseRgb(c.accent_color_custom) || [79, 216, 255];
+                else if (k === 'panel_color_on_custom') val = parseRgb(c.panel_color_on_custom) || [79, 216, 255];
                 else val = c[k] === undefined ? (Array.isArray(FIELD_DEF[k]) ? FIELD_DEF[k].slice() : FIELD_DEF[k]) : c[k];
                 out[k] = val === undefined ? '' : val;
             });
@@ -5233,6 +6135,8 @@
         _build() {
             this._built = true;
             const root = this.shadowRoot || this.attachShadow({mode: 'open'});
+            const groupHtml = tab => GROUPS[tab].map(g => `<ha-expansion-panel class="grp" outlined data-group="${tab}.${g.id}">
+                        <ha-form id="f-${tab}-${g.id}"></ha-form></ha-expansion-panel>`).join('');
             root.innerHTML = `
                 <style>${EDITOR_CSS}</style>
                 <div class="tabs" role="tablist">
@@ -5244,27 +6148,48 @@
                     <button class="btn" id="addcam" type="button">${tr('ed.add_camera')}</button>
                 </div>
                 <div class="panel" data-panel="layout">
-                    <ha-form id="f-layout"></ha-form>
+                    ${groupHtml('layout')}
                     <div class="note" id="layoutnote" hidden>${tr('ed.layout_note')}</div>
                 </div>
                 <div class="panel" data-panel="intro"><ha-form id="f-intro"></ha-form></div>
-                <div class="panel" data-panel="look"><ha-form id="f-look"></ha-form></div>
+                <div class="panel" data-panel="look">${groupHtml('look')}</div>
                 <div class="panel" data-panel="panel"><ha-form id="f-panel"></ha-form><div class="note">${tr('ed.panel_note')}</div></div>
                 <div class="panel" data-panel="controls"><ha-form id="f-controls"></ha-form></div>
                 <div class="panel" data-panel="adv"><ha-form id="f-adv"></ha-form></div>`;
 
             root.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => this._setTab(b.dataset.tab)));
 
-            const schemas = {layout: layoutSchema(1, 'auto'), intro: introSchema('focus'), look: lookSchema('primary', false), panel: PANEL_SCHEMA(), controls: CONTROLS_SCHEMA('own'), adv: ADV_SCHEMA()};
-            Object.keys(schemas).forEach(id => {
-                const form = root.getElementById('f-' + id);
-                this._prepForm(form, schemas[id]);
+            const schemas = {layout: layoutSchema(1, 'auto'), intro: introSchema('focus'), look: lookSchema('primary', false, undefined, false, false), panel: PANEL_SCHEMA(), controls: CONTROLS_SCHEMA('own'), adv: ADV_SCHEMA()};
+            const parts = [];   // formularer: {fid, tab, schema}
+            Object.keys(schemas).forEach(tab => {
+                if (GROUPS[tab]) GROUPS[tab].forEach(g => parts.push({fid: `${tab}-${g.id}`, tab, schema: schemas[tab].filter(f => g.fields.includes(f.name))}));
+                else parts.push({fid: tab, tab, schema: schemas[tab]});
+            });
+            parts.forEach(({fid, tab, schema}) => {
+                const id = tab;
+                const form = root.getElementById('f-' + fid);
+                this._prepForm(form, schema);
                 form.addEventListener('value-changed', ev => {
                     ev.stopPropagation();
                     this._setFields(ev.detail.value);
                     this._fire();
-                    if (id === 'layout' || id === 'intro' || id === 'look' || id === 'controls' || id === 'adv') this._syncForm(id);
+                    if (id === 'layout' || id === 'intro' || id === 'look' || id === 'controls' || id === 'panel' || id === 'adv') this._syncForm(id);
                     if (id === 'layout') this._syncForm('adv');   // layout og karrusel afgør, hvilke pause-valg der er tilgængelige
+                });
+            });
+
+            // Sammenfoldelige afsnit: huskes, så et afsnit ikke klapper sammen, når en kontakt i det ændrer skemaet
+            root.querySelectorAll('ha-expansion-panel.grp').forEach(pn => {
+                const key = pn.dataset.group;
+                const [tab, gid] = key.split('.');
+                pn.header = tr(`group.${tab}.${gid}`);
+                pn.outlined = true;
+                pn.expanded = this._openGroups.has(key);
+                pn.addEventListener('expanded-changed', ev => {
+                    if (ev.target !== pn) return;
+                    ev.stopPropagation();
+                    if (ev.detail && ev.detail.expanded) this._openGroups.add(key);
+                    else this._openGroups.delete(key);
                 });
             });
 
@@ -5315,6 +6240,33 @@
                     <div class="subh">${tr('ed.ctl_head')}</div>
                     <ha-form class="ctl"></ha-form>
                     <div class="note">${tr('ed.ctl_note')}</div>
+                    <div class="subh">${tr('ed.panel_head')}</div>
+                    <ha-form class="pmode"></ha-form>
+                    <div class="note">${tr('ed.panel_note')}</div>
+                    <div class="items"></div>
+                    <div class="actions pact">
+                        <button class="btn sm add-item" type="button">${tr('ed.add_item')}</button>
+                        <button class="btn sm add-priv" type="button">${tr('ed.add_privacy')}</button>
+                        <button class="btn sm ins-def" type="button">${tr('ed.insert_defaults')}</button>
+                    </div>
+                    <div class="copybox">
+                        <ha-form class="copyto"></ha-form>
+                        <button class="btn sm copybtn" type="button">${tr('ed.copy_items')}</button>
+                    </div>
+                    <div class="xbox">
+                        <div class="actions">
+                            <button class="btn sm xcopy" type="button">${tr('ed.x_copy')}</button>
+                            <button class="btn sm xpaste" type="button">${tr('ed.x_paste')}</button>
+                        </div>
+                        <textarea class="xtext" rows="4" spellcheck="false" hidden></textarea>
+                        <div class="actions xact" hidden>
+                            <button class="btn sm xuse" type="button">${tr('ed.x_use')}</button>
+                            <button class="btn sm xcancel" type="button">${tr('ed.x_cancel')}</button>
+                        </div>
+                        <div class="note xmsg" hidden></div>
+                    </div>
+                    <div class="subh">${tr('ed.fit_head')}</div>
+                    <ha-form class="fit"></ha-form>
                     <div class="actions">
                         <button class="btn sm up" type="button" title="${tr('ed.move_up_title')}">${tr('ed.move_up')}</button>
                         <button class="btn sm down" type="button" title="${tr('ed.move_down_title')}">${tr('ed.move_down')}</button>
@@ -5356,6 +6308,129 @@
             ctl.addEventListener('value-changed', ev => {
                 ev.stopPropagation();
                 this._onCtl(ci, ev.detail.value);
+            });
+
+            const pmode = q('.pmode');
+            this._prepForm(pmode, PANEL_MODE_SCHEMA());
+            pmode.addEventListener('value-changed', ev => {
+                ev.stopPropagation();
+                const cam = cams()[ci];
+                const m = ev.detail.value.panel_mode;
+                if (m === 'extra' || m === 'custom') cam.panel_mode = m;
+                else delete cam.panel_mode;
+                this._fire();
+                this._sync();
+            });
+            q('.add-item').addEventListener('click', () => {
+                const cam = cams()[ci];
+                const list = this._itemsOf(cam);
+                list.push({entity: ''});
+                this._setItems(cam, list);
+                if (!cam.panel_mode) cam.panel_mode = 'extra';
+                this._openItem = {ci, ni: list.length - 1};
+                this._fire();
+                this._sync();
+            });
+            q('.add-priv').addEventListener('click', () => {
+                const cam = cams()[ci];
+                const list = this._itemsOf(cam);
+                list.push({type: 'privacy'});
+                this._setItems(cam, list);
+                cam.panel_mode = 'custom';
+                this._openItem = {ci, ni: list.length - 1};
+                this._fire();
+                this._sync();
+            });
+            q('.ins-def').addEventListener('click', () => {
+                const cam = cams()[ci];
+                const list = this._itemsOf(cam);
+                this._defaultItems(cam).forEach(it => {
+                    const has = list.some(x => it.type === 'privacy' ? x.type === 'privacy' : x.entity === it.entity);
+                    if (!has) list.push(it);
+                });
+                this._setItems(cam, list);
+                cam.panel_mode = 'custom';
+                this._fire();
+                this._sync();
+            });
+            const copyto = q('.copyto');
+            this._prepForm(copyto, []);
+            copyto.addEventListener('value-changed', ev => {
+                ev.stopPropagation();
+                this._copyTo = Object.assign(this._copyTo || {}, {[ci]: ev.detail.value.el_copy_to || []});
+                this._syncCam(ci);
+            });
+            q('.copybtn').addEventListener('click', () => {
+                const cam = cams()[ci];
+                const targets = (this._copyTo && this._copyTo[ci]) || [];
+                targets.forEach(t => {
+                    const j = parseInt(t, 10);
+                    const dst = cams()[j];
+                    if (!dst || j === ci) return;
+                    if (cam.panel_mode) dst.panel_mode = cam.panel_mode;
+                    else delete dst.panel_mode;
+                    this._setItems(dst, JSON.parse(JSON.stringify(this._itemsOf(cam))));
+                });
+                if (this._copyTo) this._copyTo[ci] = [];
+                this._fire();
+                this._sync();
+            });
+
+            // Kopiér og indsæt hele panelet som tekst (virker på tværs af kameraer, kort og dashboards)
+            const xt = q('.xtext');
+            const xmsg = text => { const m = q('.xmsg'); m.textContent = text || ''; m.hidden = !text; };
+            const xshow = on => { xt.hidden = !on; q('.xact').hidden = !on; };
+            const xapply = text => xgot(this._panelFromText(text));
+            const xgot = got => {
+                if (!got) return false;
+                const cam = cams()[ci];
+                if (got.mode === 'default') delete cam.panel_mode;
+                else cam.panel_mode = got.mode;
+                this._setItems(cam, got.items);
+                this._fire();
+                this._sync();
+                return true;
+            };
+            q('.xcopy').addEventListener('click', async () => {
+                const cam = cams()[ci];
+                const text = this._panelToText(cam);
+                xshow(false);
+                if (!text) { xmsg(tr('ed.x_nothing')); return; }
+                // Gemmes i kortets egen udklipsholder; teksten lægges også på browserens, hvis den tillader det (til brug på en anden enhed)
+                PanelClip.set({mode: cam.panel_mode === 'extra' ? 'extra' : 'custom', items: this._itemsOf(cam).map(cleanPanelItem).filter(Boolean).slice(0, 40), from: String(cam.name || '').slice(0, 40)});
+                xmsg(tr('ed.x_copied'));
+                copyToClipboard(text, this.shadowRoot);
+            });
+            q('.xpaste').addEventListener('click', async () => {
+                xmsg('');
+                const clip = PanelClip.get();
+                if (clip && xgot({mode: clip.mode, items: JSON.parse(JSON.stringify(clip.items))})) { xshow(false); xmsg(tr('ed.x_pasted')); return; }
+                try {
+                    const text = await navigator.clipboard.readText();
+                    if (xapply(text)) { xshow(false); xmsg(tr('ed.x_pasted')); return; }
+                } catch (e) { /* udklipsholderen kan ikke læses: tekstfeltet bruges */ }
+                xt.value = '';
+                xshow(true);
+                xt.focus();
+                xmsg(tr('ed.x_paste_here'));
+            });
+            q('.xuse').addEventListener('click', () => {
+                if (xapply(xt.value)) { xshow(false); xt.value = ''; xmsg(tr('ed.x_pasted')); }
+                else xmsg(tr('ed.x_bad'));
+            });
+            q('.xcancel').addEventListener('click', () => { xshow(false); xt.value = ''; xmsg(''); });
+
+            const fit = q('.fit');
+            this._prepForm(fit, CAM_FIT_SCHEMA());
+            fit.addEventListener('value-changed', ev => {
+                ev.stopPropagation();
+                const cam = cams()[ci];
+                const v = ev.detail.value;
+                [['cam_video_fit', 'video_fit'], ['cam_video_fit_fs', 'video_fit_fs'], ['cam_video_fit_fs_touch', 'video_fit_fs_touch']].forEach(([f, key]) => {
+                    if (FITS.includes(v[f])) cam[key] = v[f];
+                    else delete cam[key];
+                });
+                this._fire();
             });
 
             q('.add').addEventListener('click', () => {
@@ -5406,7 +6481,7 @@
             const streams = this._streams(cam);
             const ptz = !!cam.ptz && cam.ptz.enabled !== false;
             block.querySelector('.cn').textContent = cam.name || tr('camera_n', ci + 1);
-            const ctl = !!cam.control && Object.keys(cam.control).some(k => cam.control[k]);
+            const ctl = (!!cam.control && Object.keys(cam.control).some(k => cam.control[k])) || (cam.panel_mode && cam.panel_mode !== 'default' && this._itemsOf(cam).length > 0);
             block.querySelector('.badges').innerHTML =
                 `<span>${streams.length ? streams.map((s, i) => s.name || `S${i}`).join(' · ') : 'ingen stream'}</span>` +
                 (ptz ? '<ha-icon icon="mdi:arrow-all" title="PTZ"></ha-icon>' : '') +
@@ -5437,27 +6512,46 @@
         /** Sætter værdierne i en fane og skifter skema, når felterne afhænger af valget. */
         _syncForm(id) {
             const c = this._config;
-            const form = this.shadowRoot.getElementById('f-' + id);
+            const grouped = GROUPS[id];
+            // Skemaet gives til fanens formular, eller deles ud på gruppernes formularer (tomme grupper skjules)
+            const setSchema = schema => {
+                if (!grouped) {
+                    this.shadowRoot.getElementById('f-' + id).schema = schema;
+                    return;
+                }
+                grouped.forEach(g => {
+                    const part = schema.filter(f => g.fields.includes(f.name));
+                    const f = this.shadowRoot.getElementById(`f-${id}-${g.id}`);
+                    f.schema = part;
+                    f.parentNode.hidden = !part.length;
+                });
+            };
 
             if (id === 'layout') {
                 const layout = c.layout || 'auto';
                 const key = `${c.cameras.length > 1}|${layout}|${c.carousel === true}|${c.fullscreen_nav !== false}`;
                 if (key !== this._layoutKey) {
                     this._layoutKey = key;
-                    form.schema = layoutSchema(c.cameras.length, layout, c.carousel === true, c.fullscreen_nav !== false);
+                    setSchema(layoutSchema(c.cameras.length, layout, c.carousel === true, c.fullscreen_nav !== false));
                 }
             } else if (id === 'intro') {
                 const key = `${(c.intro || 'focus') === 'none'}`;
                 if (key !== this._introKey) {
                     this._introKey = key;
-                    form.schema = introSchema(c.intro || 'focus');
+                    setSchema(introSchema(c.intro || 'focus'));
                 }
             } else if (id === 'look') {
                 const color = c.accent_color || 'primary';
-                const key = `${color === 'custom'}|${c.cam_label === true}|${c.cam_label_color === 'custom'}|${c.cam_label_readout === true}`;
+                const key = `${color === 'custom'}|${c.cam_label === true}|${c.cam_label_color === 'custom'}|${c.cam_label_readout === true}|${this._arIsCustom()}`;
                 if (key !== this._lookKey) {
                     this._lookKey = key;
-                    form.schema = lookSchema(color, c.cam_label === true, c.cam_label_color, c.cam_label_readout === true);
+                    setSchema(lookSchema(color, c.cam_label === true, c.cam_label_color, c.cam_label_readout === true, this._arIsCustom()));
+                }
+            } else if (id === 'panel') {
+                const key = `${c.panel_color_on === 'custom'}`;
+                if (key !== this._panelKey) {
+                    this._panelKey = key;
+                    setSchema(PANEL_SCHEMA(c.panel_color_on));
                 }
             } else if (id === 'adv') {
                 const multi = c.cameras.length > 1 && c.layout !== 'single';
@@ -5466,16 +6560,19 @@
                 const key = `${multi}|${blocked}|${bg}`;
                 if (key !== this._advKey) {
                     this._advKey = key;
-                    form.schema = ADV_SCHEMA(multi, blocked, bg);
+                    setSchema(ADV_SCHEMA(multi, blocked, bg));
                 }
             } else if (id === 'controls') {
                 const mode = this._uiMode();
                 if (mode !== this._ctlKey) {
                     this._ctlKey = mode;
-                    form.schema = CONTROLS_SCHEMA(mode);
+                    setSchema(CONTROLS_SCHEMA(mode));
                 }
             }
-            form.data = this._fieldData(TAB_FIELDS[id]);
+            if (grouped) grouped.forEach(g => {
+                this.shadowRoot.getElementById(`f-${id}-${g.id}`).data = this._fieldData(g.fields);
+            });
+            else this.shadowRoot.getElementById('f-' + id).data = this._fieldData(TAB_FIELDS[id]);
         }
 
         /** Hvordan knapper på billedet er sat: own (kortets egne), browser (browserens) eller none. */
@@ -5513,6 +6610,201 @@
             const ctlForm = q('.ctl');
             ctlForm.data = Object.assign({privacy: '', preset: '', patrol: '', patrol_mode: '', light: ''}, cam.control || {});
             ctlForm.hass = this._hass;
+            this._syncItems(ci);
+            const fitForm = q('.fit');
+            fitForm.data = {cam_video_fit: FITS.includes(cam.video_fit) ? cam.video_fit : 'follow', cam_video_fit_fs: FITS.includes(cam.video_fit_fs) ? cam.video_fit_fs : 'follow', cam_video_fit_fs_touch: FITS.includes(cam.video_fit_fs_touch) ? cam.video_fit_fs_touch : 'follow'};
+            fitForm.hass = this._hass;
+        }
+
+        /* ---------- Egne elementer i panelet (pr. kamera) ---------- */
+
+        _itemsOf(cam) {
+            return Array.isArray(cam.panel_items) ? cam.panel_items : [];
+        }
+
+        /** Panelet som tekst (JSON) til udklipsholderen. Tom tekst, hvis kameraet bruger standardpanelet uden egne elementer. */
+        _panelToText(cam) {
+            const items = this._itemsOf(cam);
+            if (!items.length) return '';
+            return JSON.stringify({panoptes_panel: 1, panel_mode: cam.panel_mode === 'extra' ? 'extra' : 'custom', panel_items: items});
+        }
+
+        /** Indsat tekst som panel: {mode, items} eller null. Alt renses; højst 40 elementer. */
+        _panelFromText(text) {
+            let d;
+            try { d = JSON.parse(String(text || '').trim()); } catch (e) { return null; }
+            const list = Array.isArray(d) ? d : (d && typeof d === 'object' ? d.panel_items : null);
+            if (!Array.isArray(list)) return null;
+            const items = list.map(cleanPanelItem).filter(Boolean).slice(0, 40);
+            if (list.length && !items.length) return null;
+            const m = !Array.isArray(d) && d.panel_mode;
+            const mode = !items.length ? 'default' : (m === 'extra' ? 'extra' : 'custom');
+            return {mode, items};
+        }
+
+        _setItems(cam, list) {
+            if (list.length) cam.panel_items = list;
+            else delete cam.panel_items;
+        }
+
+        /** Standardpanelets elementer ud fra kameraets felter, så det kan genskabes og ændres som egne elementer. */
+        _defaultItems(cam) {
+            const c = cam.control || {};
+            const out = [];
+            if (c.privacy) out.push({type: 'privacy'});
+            if (c.preset) out.push({entity: c.preset, name: tr('tile.cp.position')});
+            if (c.patrol) out.push({entity: c.patrol, name: tr('tile.cp.patrol'), icon: 'mdi:rotate-right', hide_ptz: true});
+            if (c.patrol_mode) out.push({entity: c.patrol_mode, name: tr('tile.cp.patrol_mode'), display: 'chips'});
+            if (c.light) out.push({entity: c.light, name: tr('tile.cp.light'), icon: 'mdi:light-flood-down', display: 'toggle'});
+            return out;
+        }
+
+        _itemData(raw) {
+            return {
+                el_entity: raw.entity || '', el_name: raw.name || '', el_icon: raw.icon || '',
+                el_display: DISPLAYS.includes(raw.display) ? raw.display : 'auto',
+                el_color: raw.color ? 'custom' : 'default', el_color_custom: parseRgb(raw.color) || EL_SWATCH.slice(),
+                el_color_on: raw.color_on ? 'custom' : 'default', el_color_on_custom: parseRgb(raw.color_on) || EL_SWATCH.slice(),
+                el_in_panel: raw.in_panel !== false, el_on_picture: ['left', 'right'].includes(raw.on_picture) ? raw.on_picture : 'none',
+                el_hide_ptz: raw.hide_ptz === true,
+                el_pic_show: PIC_SHOWS.includes(raw.pic_show) ? raw.pic_show : 'auto',
+            };
+        }
+
+        _itemRow(ci, ni) {
+            const row = document.createElement('div');
+            row.className = 'row item';
+            row.innerHTML = `
+                <button class="item-head" type="button">
+                    <ha-icon class="ii" icon="mdi:tune-variant"></ha-icon>
+                    <span class="in"></span>
+                    <ha-icon class="chev" icon="mdi:chevron-down"></ha-icon>
+                </button>
+                <div class="item-body" hidden>
+                    <ha-form class="itemform"></ha-form>
+                    <div class="actions">
+                        <button class="btn sm iup" type="button" title="${tr('ed.move_up_title')}">${tr('ed.move_up')}</button>
+                        <button class="btn sm idown" type="button" title="${tr('ed.move_down_title')}">${tr('ed.move_down')}</button>
+                        <button class="btn sm irm" type="button">${tr('ed.remove_item')}</button>
+                    </div>
+                </div>`;
+            const q = sel => row.querySelector(sel);
+            const cam = () => this._config.cameras[ci];
+            q('.item-head').addEventListener('click', () => {
+                const o = this._openItem;
+                this._openItem = o && o.ci === ci && o.ni === ni ? null : {ci, ni};
+                this._applyOpenItems(ci);
+            });
+            const form = q('.itemform');
+            this._prepForm(form, []);
+            form.addEventListener('value-changed', ev => {
+                ev.stopPropagation();
+                this._onItem(ci, ni, ev.detail.value);
+            });
+            const move = dir => {
+                const list = this._itemsOf(cam());
+                const j = ni + dir;
+                if (j < 0 || j >= list.length) return;
+                [list[ni], list[j]] = [list[j], list[ni]];
+                this._openItem = {ci, ni: j};
+                this._fire();
+                this._sync();
+            };
+            q('.iup').addEventListener('click', () => move(-1));
+            q('.idown').addEventListener('click', () => move(1));
+            q('.irm').addEventListener('click', () => {
+                const list = this._itemsOf(cam());
+                list.splice(ni, 1);
+                this._setItems(cam(), list);
+                this._openItem = null;
+                this._fire();
+                this._sync();
+            });
+            return row;
+        }
+
+        _onItem(ci, ni, v) {
+            const cam = this._config.cameras[ci];
+            const list = this._itemsOf(cam);
+            const raw = Object.assign({}, list[ni]);
+            const put = (k, val, keep) => { if (keep) raw[k] = val; else delete raw[k]; };
+            if (raw.type !== 'privacy') raw.entity = (v.el_entity || '').trim();
+            const dom = (raw.entity || '').split('.')[0];
+            put('name', (v.el_name || '').trim().slice(0, 40), !!(v.el_name || '').trim());
+            put('icon', v.el_icon, !!v.el_icon);
+            put('display', v.el_display, raw.type !== 'privacy' && v.el_display && v.el_display !== 'auto' && EL_DISPLAYS(dom).includes(v.el_display));
+            put('color', Array.isArray(v.el_color_custom) ? toHex(v.el_color_custom) : '', v.el_color === 'custom' && Array.isArray(v.el_color_custom));
+            put('color_on', Array.isArray(v.el_color_on_custom) ? toHex(v.el_color_on_custom) : '', v.el_color_on === 'custom' && Array.isArray(v.el_color_on_custom));
+            put('in_panel', false, v.el_in_panel === false);
+            put('on_picture', v.el_on_picture, v.el_on_picture === 'left' || v.el_on_picture === 'right');
+            put('pic_show', v.el_pic_show, (v.el_on_picture === 'left' || v.el_on_picture === 'right') && PIC_SHOWS.includes(v.el_pic_show));
+            put('hide_ptz', true, raw.type !== 'privacy' && v.el_hide_ptz === true && ONOFF_DOM.includes(dom));
+            list[ni] = raw;
+            this._setItems(cam, list);
+            this._fire();
+            this._syncItems(ci);
+        }
+
+        _applyOpenItems(ci) {
+            const block = this.shadowRoot.getElementById('cams').children[ci];
+            if (!block) return;
+            const o = this._openItem;
+            Array.from(block.querySelector('.items').children).forEach((row, i) => {
+                const open = !!o && o.ci === ci && o.ni === i;
+                row.classList.toggle('open', open);
+                row.querySelector('.item-body').hidden = !open;
+                row.querySelector('.item-head').setAttribute('aria-expanded', open ? 'true' : 'false');
+            });
+        }
+
+        _syncItems(ci) {
+            const cams = this._config.cameras;
+            const cam = cams[ci];
+            const block = this.shadowRoot.getElementById('cams').children[ci];
+            const q = sel => block.querySelector(sel);
+            const list = this._itemsOf(cam);
+            q('.pmode').data = {panel_mode: cam.panel_mode === 'extra' || cam.panel_mode === 'custom' ? cam.panel_mode : 'default'};
+            q('.pmode').hass = this._hass;
+            const box = q('.items');
+            // Rækkerne bygges kun om, når antallet ændres (ellers mister felterne fokus)
+            if (box.children.length !== list.length) {
+                box.innerHTML = '';
+                list.forEach((it, ni) => box.appendChild(this._itemRow(ci, ni)));
+            }
+            list.forEach((raw, ni) => {
+                const row = box.children[ni];
+                const form = row.querySelector('.itemform');
+                const key = `${raw.type === 'privacy'}|${(raw.entity || '').split('.')[0]}|${!!raw.color}|${!!raw.color_on}|${raw.on_picture === 'left' || raw.on_picture === 'right'}`;
+                if (form.__skey !== key) {
+                    form.__skey = key;
+                    form.schema = ITEM_SCHEMA(raw);
+                }
+                form.data = this._itemData(raw);
+                form.hass = this._hass;
+                row.querySelector('.in').textContent = raw.type === 'privacy' ? tr('tile.cp.privacy') : (raw.name || raw.entity || tr('ed.item_n', ni + 1));
+                row.querySelector('.ii').setAttribute('icon', raw.icon || (raw.type === 'privacy' ? 'mdi:shield-lock-outline' : 'mdi:tune-variant'));
+                row.querySelector('.iup').disabled = ni === 0;
+                row.querySelector('.idown').disabled = ni === list.length - 1;
+            });
+            this._applyOpenItems(ci);
+            const hasPriv = list.some(x => x.type === 'privacy');
+            q('.add-priv').hidden = !(cam.control && cam.control.privacy) || hasPriv;
+            const defs = this._defaultItems(cam);
+            q('.ins-def').hidden = !defs.length;
+            // Kopiér til andre kameraer
+            const others = cams.map((c2, j) => ({value: String(j), label: c2.name || tr('camera_n', j + 1)})).filter((o, j) => j !== ci);
+            const copyBox = q('.copybox');
+            copyBox.hidden = cams.length < 2 || !list.length;
+            const copyForm = q('.copyto');
+            const ckey = others.map(o => o.value + o.label).join('|');
+            if (copyForm.__skey !== ckey) {
+                copyForm.__skey = ckey;
+                copyForm.schema = [{name: 'el_copy_to', selector: {select: {options: others, multiple: true, mode: 'list'}}}];
+            }
+            const sel = (this._copyTo && this._copyTo[ci]) || [];
+            copyForm.data = {el_copy_to: sel};
+            copyForm.hass = this._hass;
+            q('.copybtn').disabled = !sel.length;
         }
 
         _streamRow(ci, si) {
@@ -5628,8 +6920,21 @@
             const button = this._ptzIsButton(cam);
 
             block.querySelector('.ptznote').hidden = !(enabled && !button);
-            form.schema = enabled && button ? PTZ_TOGGLE.concat(PTZ_FIELDS) : PTZ_TOGGLE;
-            form.data = Object.assign({enabled}, this._ptzEntities(cam));
+            const custom = !!ptz && ptz.color === 'custom';
+            const key = `${enabled}|${button}|${custom}|${tr('ed.ptz_head')}`;
+            if (form.__key !== key) {
+                form.__key = key;
+                form.schema = enabled ? PTZ_TOGGLE.concat(button ? PTZ_FIELDS : [], PTZ_LOOK(custom)) : PTZ_TOGGLE;
+            }
+            const op = ptz ? parseFloat(ptz.opacity) : NaN;
+            form.data = Object.assign({enabled}, this._ptzEntities(cam), {
+                ptz_style: ptz && PTZ_STYLES.includes(ptz.style) ? ptz.style : 'ring',
+                ptz_size: ptz && PTZ_SIZES[ptz.size] ? ptz.size : 'medium',
+                ptz_pos: ptz && PTZ_POSITIONS.includes(ptz.pos) ? ptz.pos : 'right',
+                ptz_color: ptz && (ptz.color === 'accent' || ptz.color === 'custom') ? ptz.color : 'white',
+                ptz_color_custom: (ptz && parseRgb(ptz.color_custom)) || [79, 216, 255],
+                ptz_opacity: op >= 0 && op <= 1 ? op : 0.4,
+            });
         }
 
         _onPtz(ci, v) {
@@ -5665,6 +6970,22 @@
                         if (vals[d]) ptz['data_' + d] = {entity_id: vals[d]};
                         else delete ptz['data_' + d];
                     });
+                }
+
+                // Udseende: kun afvigelser fra standarden skrives
+                if (v.enabled && v.ptz_style !== undefined) {
+                    const put = (k, val, def) => {
+                        if (val === undefined || val === def) delete ptz[k];
+                        else ptz[k] = val;
+                    };
+                    put('style', v.ptz_style, 'ring');
+                    put('size', v.ptz_size, 'medium');
+                    put('pos', v.ptz_pos, 'right');
+                    put('color', v.ptz_color, 'white');
+                    if (v.ptz_color === 'custom') ptz.color_custom = Array.isArray(v.ptz_color_custom) ? toHex(v.ptz_color_custom) : (ptz.color_custom || '#4fd8ff');
+                    else delete ptz.color_custom;
+                    const op = parseFloat(v.ptz_opacity);
+                    put('opacity', op >= 0 && op <= 1 ? op : undefined, 0.4);
                 }
             }
 

@@ -142,6 +142,30 @@ cameras:
       light: light.camera_driveway_floodlight_timed
 
 ---
+# 8b) Your own panel: privacy, a floodlight with a slider and a mode list, plus one button on the picture
+type: custom:panoptes-card
+panel_layout: grid
+panel_color_on: custom
+panel_color_on_custom: "#ffb000"
+cameras:
+  - name: Driveway
+    streams: [{name: HD, url: driveway_hd}, {name: SD, url: driveway_sd}]
+    control:
+      privacy: switch.camera_driveway_privacy
+    panel_mode: custom
+    panel_items:
+      - type: privacy
+      - entity: light.driveway_floodlight
+        name: Floodlight
+        display: light-slider
+        on_picture: left
+        pic_show: name_icon_value
+      - entity: select.driveway_mode
+        display: chips
+      - entity: switch.driveway_patrol
+        hide_ptz: true
+
+---
 # 9) Carousel that switches camera every 15 seconds
 type: custom:panoptes-card
 layout: single
@@ -189,3 +213,38 @@ cameras:
     label: GARAGE            # own text instead of CAM 02
     streams:
       - {url: garage_hd, name: HD}
+
+---
+# 12) Picture fit: a 4:3 camera in a 16:9 card, and the whole screen in fullscreen
+type: custom:panoptes-card
+aspect_ratio: 16/9           # 16/9, 4/3, 21/9, 3/2, 1/1, 9/16 or your own, for example 16/10
+video_fit: contain           # on the card: contain (whole picture), fill (stretch) or cover (crop)
+video_fit_fs: cover          # in fullscreen: the same choices
+# video_fit_fs_touch: cover  # fullscreen on phone and tablet only (a PC keeps video_fit_fs)
+cameras:
+  - name: Robot
+    video_fit: fill          # this camera only (overrides the card's choice)
+    streams:
+      - {url: robot, name: HD}
+  - name: Front door
+    streams:
+      - {url: front_door_hd, name: HD}
+
+---
+# 13) PTZ arrows in your own style: four round buttons, large, bottom right, in the theme colour
+type: custom:panoptes-card
+cameras:
+  - name: Driveway
+    streams:
+      - {url: driveway_hd, name: HD}
+    ptz:
+      service: button.press
+      data_left: {entity_id: button.camera_driveway_move_left}
+      data_right: {entity_id: button.camera_driveway_move_right}
+      data_up: {entity_id: button.camera_driveway_move_up}
+      data_down: {entity_id: button.camera_driveway_move_down}
+      style: buttons           # ring (default), cross or buttons
+      size: large              # small, medium (default) or large
+      pos: bottom-right        # top-left, top, top-right, left, center, right (default), bottom-left, bottom, bottom-right
+      color: accent            # white (default), accent or custom (then color_custom: '#4fd8ff')
+      opacity: 0.6             # visibility until you point at the arrows (0 to 1)
